@@ -14,16 +14,13 @@
 #  limitations under the License.
 #
 
+from __future__ import annotations  # defer annotation evaluation so deferred imports below work
+
 import os
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 import time
-import json
-import torch
-import numpy as np
-import cv2
-import draccus
 from pathlib import Path
 from typing import Callable, Dict, Any, List
 from rclpy.node import Node
@@ -44,16 +41,29 @@ from aic_control_interfaces.msg import (
 )
 from geometry_msgs.msg import Wrench
 
-# LeRobot & Safetensors
-from lerobot.policies.act.modeling_act import ACTPolicy
-from lerobot.policies.act.configuration_act import ACTConfig
-from safetensors.torch import load_file
-from huggingface_hub import snapshot_download
-
 
 class RunACT(Policy):
     def __init__(self, parent_node: Node):
         super().__init__(parent_node)
+
+        # Defer heavy imports (torch, lerobot, cv2, draccus, safetensors,
+        # huggingface_hub) into __init__ so they run during the lifecycle
+        # `on_configure` callback (60 s budget) instead of at module import
+        # time. Module import happens on the executor thread and a ~16 s
+        # block there trips the engine's GetState timeout (~13 s) on cold
+        # starts → Tier 1 failure.
+        global json, torch, np, cv2, draccus
+        global ACTPolicy, ACTConfig, load_file, snapshot_download
+        import json
+        import torch
+        import numpy as np
+        import cv2
+        import draccus
+        from lerobot.policies.act.modeling_act import ACTPolicy
+        from lerobot.policies.act.configuration_act import ACTConfig
+        from safetensors.torch import load_file
+        from huggingface_hub import snapshot_download
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # -------------------------------------------------------------------------
