@@ -13,6 +13,7 @@
 #   --timeout SEC           Wall-clock timeout per run. Default: 600.
 #   --ready-wait SEC        How long to wait for engine to advertise before starting policy. Default: 90.
 #   --no-pkill              Skip post-run pkill cleanup (leaves stragglers for debugging).
+#   --no-bag                Delete per-trial bag_trial_* dirs after scoring.yaml is written (disk saver).
 #
 # Layout produced:
 #   <OUTPUT_DIR>/
@@ -43,6 +44,7 @@ READY_WAIT=90
 DO_PKILL=true
 GAZEBO_GUI=true
 LAUNCH_RVIZ=true
+NO_BAG=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --timeout)      RUN_TIMEOUT="$2"; shift 2 ;;
         --ready-wait)   READY_WAIT="$2"; shift 2 ;;
         --no-pkill)     DO_PKILL=false; shift ;;
+        --no-bag)       NO_BAG=true; shift ;;
         --no-gui)       GAZEBO_GUI=false; shift ;;
         --no-rviz)      LAUNCH_RVIZ=false; shift ;;
         --headless)     GAZEBO_GUI=false; LAUNCH_RVIZ=false; shift ;;
@@ -329,6 +332,18 @@ for i in $(seq 1 "$N"); do
     sleep 3
 
     DURATION=$(( $(date +%s) - START ))
+
+    if [[ "$NO_BAG" == "true" ]]; then
+        # --no-bag: scoring.yaml (if written) already summarized this run;
+        # the per-trial bags are just disk weight. Prune them either way
+        # so even crashed runs don't accumulate bag dirs.
+        mapfile -t BAG_DIRS < <(find "$RUN_DIR" -maxdepth 1 -type d -name 'bag_trial_*')
+        if (( ${#BAG_DIRS[@]} > 0 )); then
+            BAG_SIZE=$(du -sh "${BAG_DIRS[@]}" 2>/dev/null | tail -1 | awk '{print $1}')
+            echo "│  --no-bag: pruning ${#BAG_DIRS[@]} bag_trial_* dir(s) (${BAG_SIZE:-?})"
+            rm -rf "${BAG_DIRS[@]}"
+        fi
+    fi
 
     if [[ -f "$RUN_DIR/scoring.yaml" ]]; then
         # Quick inline extraction of the total so the progress line is useful.
