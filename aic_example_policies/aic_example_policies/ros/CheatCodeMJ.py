@@ -47,6 +47,7 @@ from aic_model.policy import (
     SendFeedbackCallback,
 )
 from aic_task_interfaces.msg import Task
+from geometry_msgs.msg import Point, Pose, Quaternion
 from tf2_ros import TransformException
 
 
@@ -56,22 +57,38 @@ from tf2_ros import TransformException
 # Approach phase: smoothly interpolate from current TCP pose to "pre-hover"
 # pose (above port at z_offset = APPROACH_Z_OFFSET). interp_fraction goes
 # 0 → 1 on a min-jerk profile over APPROACH_TIME. Slerp tracks the same clock.
-APPROACH_TIME = 4.0               # v4: 4.0 kept — extra second for SC's larger rotation & lateral distance
+# v9: per-plug timings. SFP trials are deterministic (stdev ≤ 0.05, 6/6 full
+# insertions) so we can trim without risking success rate. SC stays slow
+# because its 400× variance lives in integrator settling time.
+APPROACH_TIME_SFP = 3.5
+APPROACH_TIME_SC  = 4.0            # v4: 4.0 kept — extra second for SC's larger rotation & lateral distance
 # Hover height depends on plug type. SFP inserts into SFP ports on tall NIC
 # cards, so we need 20 cm to clear the card body. SC inserts into small rail-
 # mounted ports near the board surface — no tall obstacles to clear — so a
 # lower hover saves time and gives the integrator less window to wind up.
 APPROACH_Z_OFFSET_SFP = 0.20
-APPROACH_Z_OFFSET_SC  = 0.20  # v7 revert: v6 tried 0.10, but shorter hover reduced XY integrator settling time → T3 worse
+APPROACH_Z_OFFSET_SC  = 0.12  # v9: lowered from 0.20. v6 tried 0.10 → T3 worse (less integrator settling); 0.12 is closer to 0.10 but above the known regression point
 
 # Descent phase: z_offset falls from APPROACH_Z_OFFSET → -INSERTION_DEPTH on a
 # min-jerk profile over DESCENT_TIME. XY integrator (inside calc_gripper_pose)
 # is active and corrects lateral drift as we descend.
-DESCENT_TIME = 12.0               # v4: 12.0 kept — slower descent, more integrator settling time
+DESCENT_TIME_SFP = 9.0
+DESCENT_TIME_SC  = 12.0            # v4: 12.0 kept — slower descent, more integrator settling time
 INSERTION_DEPTH = 0.015           # v5 REVERT to 0.015 (v4 tried 0.020 — likely contributed to trial 1's 66 N impact)
 
-SETTLE_TIME = 2.0                 # v4: 2.0 kept
+SETTLE_TIME_SFP = 1.5
+SETTLE_TIME_SC  = 2.0              # v4: 2.0 kept
 CONTROL_RATE_HZ = 20.0
+
+# v8: final "release" message before insert_cable returns.
+# aic_controller holds last_tool_reference_ through entity deletion; on cable
+# delete the impedance loop jolts toward that stale target. Publishing a
+# hold-current-pose-with-low-stiffness MotionUpdate first makes the controller
+# compliant through the engine's teardown window (delete entities → deactivate
+# → reset_joints → reactivate).
+RELEASE_STIFFNESS = [75.0, 75.0, 75.0, 75.0, 75.0, 75.0]  # v9.3: match yaml config default (aic_ros2_controllers.yaml:63). Pose=current_tcp so error≈0 regardless of stiffness — compliance not needed. High stiffness carries over across ctrl reactivate (impedance_params_ only reset on_configure), making trial 2+ start identical to trial 1.
+RELEASE_DAMPING   = [35.0, 35.0, 35.0, 35.0, 35.0, 35.0]  # v9.3: match yaml config default (aic_ros2_controllers.yaml:64).
+RELEASE_HOLD_TIME = 0.2  # s — ensure the controller ingests it before deactivate
 
 LOG_ENABLED = os.environ.get("CHEATCODE_MJ_LOG", "1") != "0"
 
@@ -170,6 +187,29 @@ class CheatCodeMJ(CheatCode):
             target_frame, source_frame, Time()
         ).transform
 
+    def _publish_release_hold(self, move_robot: MoveRobotCallback) -> None:
+        try:
+            tcp = self._lookup("base_link", "gripper/tcp")
+        except TransformException as ex:
+            self.get_logger().warn(f"Release TF lookup failed, skipping: {ex}")
+            return
+        hold_pose = Pose(
+            position=Point(
+                x=tcp.translation.x, y=tcp.translation.y, z=tcp.translation.z
+            ),
+            orientation=Quaternion(
+                x=tcp.rotation.x, y=tcp.rotation.y,
+                z=tcp.rotation.z, w=tcp.rotation.w,
+            ),
+        )
+        self.set_pose_target(
+            move_robot=move_robot,
+            pose=hold_pose,
+            stiffness=RELEASE_STIFFNESS,
+            damping=RELEASE_DAMPING,
+        )
+        self.sleep_for(RELEASE_HOLD_TIME)
+
     # ------------------------------------------------------------------
     # Main entry
     # ------------------------------------------------------------------
@@ -210,13 +250,26 @@ class CheatCodeMJ(CheatCode):
             port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
         )
 
-        # Pick hover height by plug type. Default to SFP (tallest) for
-        # unrecognised types so we err on the side of more clearance.
+        # Pick hover height + timings by plug type. Default to SFP's hover
+        # height (tallest) for unrecognised types so we err on the side of
+        # more clearance, but default *timings* to SC's (slower, safer) for
+        # the same reason.
         plug_type_lower = (task.plug_type or "").lower()
         if plug_type_lower == "sc":
             approach_z_offset = APPROACH_Z_OFFSET_SC
+            approach_time = APPROACH_TIME_SC
+            descent_time = DESCENT_TIME_SC
+            settle_time = SETTLE_TIME_SC
+        elif plug_type_lower == "sfp":
+            approach_z_offset = APPROACH_Z_OFFSET_SFP
+            approach_time = APPROACH_TIME_SFP
+            descent_time = DESCENT_TIME_SFP
+            settle_time = SETTLE_TIME_SFP
         else:
             approach_z_offset = APPROACH_Z_OFFSET_SFP
+            approach_time = APPROACH_TIME_SC
+            descent_time = DESCENT_TIME_SC
+            settle_time = SETTLE_TIME_SC
 
         self._write_summary(
             summary,
@@ -237,12 +290,12 @@ class CheatCodeMJ(CheatCode):
         self._write_summary(
             summary,
             "Schedule",
-            approach_time_s=APPROACH_TIME,
+            approach_time_s=approach_time,
             approach_z_offset_m=approach_z_offset,  # chosen by plug_type
             plug_type=plug_type_lower,
-            descent_time_s=DESCENT_TIME,
+            descent_time_s=descent_time,
             insertion_depth_m=INSERTION_DEPTH,
-            settle_time_s=SETTLE_TIME,
+            settle_time_s=settle_time,
             control_rate_hz=CONTROL_RATE_HZ,
         )
 
@@ -253,12 +306,14 @@ class CheatCodeMJ(CheatCode):
         # calc_gripper_pose(reset_xy_integrator=True) during this phase so
         # the integrator stays at zero until we're hovering above the port.
         # ============================================================
-        approach_traj = _scalar_trajectory(0.0, 1.0, APPROACH_TIME)
+        approach_traj = _scalar_trajectory(0.0, 1.0, approach_time)
         t0 = self.time_now()
         while True:
             elapsed = (self.time_now() - t0).nanoseconds / 1e9
-            if elapsed >= approach_traj.duration:
+            if elapsed >= approach_traj.duration + 0.5:
                 break
+            # hebi.get_state clamps past-duration automatically → extra 0.5 s
+            # holds interp=1.0 at hover, giving the arm a settle window.
             f, _, _ = approach_traj.get_state(elapsed)
             interp = float(f[0])
             try:
@@ -277,6 +332,24 @@ class CheatCodeMJ(CheatCode):
 
         send_feedback("approach complete, starting descent")
 
+        # Re-lookup port_tf after hover settles. Approach-time snapshot may be
+        # stale vs current TF state; descent uses live port pose.
+        try:
+            port_tf = self._parent_node._tf_buffer.lookup_transform(
+                "base_link", port_frame, Time()
+            ).transform
+            port_xyz = (
+                port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
+            )
+            self._write_summary(
+                summary,
+                "Port TF refresh (post-approach)",
+                port_xyz=port_xyz,
+                port_quat_wxyz=(port_tf.rotation.w, port_tf.rotation.x, port_tf.rotation.y, port_tf.rotation.z),
+            )
+        except TransformException as ex:
+            self.get_logger().warn(f"Post-approach port TF refresh failed, keeping snapshot: {ex}")
+
         # ============================================================
         # Phase B — descent: z_offset goes APPROACH_Z_OFFSET → -INSERTION_DEPTH
         # on min-jerk. interp_fraction is pinned at 1 (orientation already
@@ -284,7 +357,7 @@ class CheatCodeMJ(CheatCode):
         # port_xy vs plug_xy correction exactly like CheatCode.
         # ============================================================
         descent_traj = _scalar_trajectory(
-            approach_z_offset, -INSERTION_DEPTH, DESCENT_TIME
+            approach_z_offset, -INSERTION_DEPTH, descent_time
         )
         t0 = self.time_now()
         last_z_offset = approach_z_offset
@@ -311,7 +384,7 @@ class CheatCodeMJ(CheatCode):
 
         # Settle at the final z_offset.
         self.get_logger().info("Descent complete, settling...")
-        self.sleep_for(SETTLE_TIME)
+        self.sleep_for(settle_time)
 
         # Final snapshot
         try:
@@ -338,6 +411,8 @@ class CheatCodeMJ(CheatCode):
             )
         except TransformException:
             pass
+
+        self._publish_release_hold(move_robot)
 
         if summary: summary.close()
         if csvf: csvf.close()
