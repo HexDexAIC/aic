@@ -285,20 +285,20 @@ class AICAsyncRecorder(Node):
 
     # ── episode lifecycle ──────────────────────────────────────────
     def _open_episode(self) -> None:
-        # Wait briefly for the first observation so we know image dims.
-        with self._lock:
-            obs = self._latest.obs
-        deadline = time.monotonic() + 5.0
-        while obs is None and time.monotonic() < deadline:
-            rclpy.spin_once(self, timeout_sec=0.05)
-            with self._lock:
-                obs = self._latest.obs
-        if obs is None:
-            self.get_logger().error(
-                "Episode start: no Observation received in 5 s — skipping"
-            )
-            return
+        """Mark that an episode should be recording. The writer is lazy-init'd
+        on the first `_tick()` once an Observation has arrived — we cannot
+        spin the executor here because we are inside an executor callback.
+        """
+        self.get_logger().info(
+            "=== STATUS_EXECUTING — recording will start on first observation ==="
+        )
 
+    def _ensure_writer(self, obs: Observation) -> bool:
+        """Lazy-init the dataset writer the first time an observation is
+        available within an active episode. Returns True if the writer is
+        ready."""
+        if self._writer is not None:
+            return True
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         repo_id = f"local/aic_recording_{ts}"
         root = self._dataset_root / f"aic_recording_{ts}"
@@ -310,9 +310,11 @@ class AICAsyncRecorder(Node):
             self._writer = _Writer(
                 root=root, repo_id=repo_id, fps=self._fps, image_shape=(h, w, 3)
             )
+            return True
         except Exception as e:
             self.get_logger().error(f"Failed to create writer: {e}")
             self._writer = None
+            return False
 
     def _close_episode(self) -> None:
         if self._writer is None:
@@ -336,12 +338,14 @@ class AICAsyncRecorder(Node):
 
     # ── per-tick sample ────────────────────────────────────────────
     def _tick(self) -> None:
-        if self._writer is None or not self._was_executing:
+        if not self._was_executing:
             return
         with self._lock:
             obs = self._latest.obs
             action = self._latest.action
         if obs is None or action is None:
+            return
+        if not self._ensure_writer(obs):
             return
         try:
             frame = {
