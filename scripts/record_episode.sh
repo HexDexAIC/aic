@@ -41,6 +41,11 @@
 #                         Default: 1.5.
 #   --stuck-progress-m M  Min net distance reduction over the window to
 #                         keep going. Default: 0.002.
+#   --lift-time-frac F    How long the lift-to-hover takes, as a fraction
+#                         of descent_time. The dominant wait between a
+#                         failed attempt and the next descent. Default: 0.5.
+#   --hover-hold-s S      Steady-state hold at hover between attempts.
+#                         Default: 0.5.
 #   --gui                 Launch Gazebo GUI client (default OFF — laptop-friendly).
 #   --no-rviz             Skip RViz (default ON — lightweight viz).
 #   --headless            --no-gui + --no-rviz (no viz at all).
@@ -75,8 +80,10 @@ MAX_RETRIES=""            # empty = use the policy's default
 BAD_PORT_OFFSET_X=""      # empty = no offset (default)
 BAD_PORT_OFFSET_Y=""      # empty = no offset (default)
 STUCK_MIN_FRACTION=""     # empty = use the policy's default (0.3)
-STUCK_WINDOW_S=""         # empty = use the policy's default (1.5)
+STUCK_WINDOW_S=""         # empty = use the policy's default (1.0)
 STUCK_PROGRESS_M=""       # empty = use the policy's default (0.002)
+LIFT_TIME_FRAC=""         # empty = use the policy's default (0.5)
+HOVER_HOLD_S=""           # empty = use the policy's default (0.5)
 GROUND_TRUTH=false
 RUN_TIMEOUT=300
 READY_WAIT=90
@@ -99,6 +106,8 @@ while [[ $# -gt 0 ]]; do
         --stuck-min-fraction) STUCK_MIN_FRACTION="$2"; shift 2 ;;
         --stuck-window-s)    STUCK_WINDOW_S="$2"; shift 2 ;;
         --stuck-progress-m)  STUCK_PROGRESS_M="$2"; shift 2 ;;
+        --lift-time-frac)    LIFT_TIME_FRAC="$2"; shift 2 ;;
+        --hover-hold-s)      HOVER_HOLD_S="$2"; shift 2 ;;
         --ground-truth)  GROUND_TRUTH=true; shift ;;
         --timeout)       RUN_TIMEOUT="$2"; shift 2 ;;
         --ready-wait)    READY_WAIT="$2"; shift 2 ;;
@@ -271,6 +280,12 @@ if [[ -n "$STUCK_WINDOW_S" ]]; then
 fi
 if [[ -n "$STUCK_PROGRESS_M" ]]; then
     POLICY_ARGS+=( -p stuck_progress_m:=$STUCK_PROGRESS_M )
+fi
+if [[ -n "$LIFT_TIME_FRAC" ]]; then
+    POLICY_ARGS+=( -p lift_time_frac:=$LIFT_TIME_FRAC )
+fi
+if [[ -n "$HOVER_HOLD_S" ]]; then
+    POLICY_ARGS+=( -p hover_hold_s:=$HOVER_HOLD_S )
 fi
 (
     cd "$SRC"

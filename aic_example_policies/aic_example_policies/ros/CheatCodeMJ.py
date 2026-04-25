@@ -89,8 +89,8 @@ CONTROL_RATE_HZ = 20.0
 # declared in __init__ so we don't have to re-edit + reinstall to sweep.
 DEFAULT_INSERTION_THRESHOLD_M = 0.005
 DEFAULT_MAX_INSERTION_RETRIES = 1
-LIFT_TIME_FRAC = 0.5  # lift back to hover takes this fraction of descent_time
-HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry descent
+DEFAULT_LIFT_TIME_FRAC = 0.5  # lift back to hover takes this fraction of descent_time
+DEFAULT_HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry descent
 
 # Early-abort during descent. Sample plug-port distance every control tick;
 # once we're past stuck_min_fraction of the descent, look at the recent
@@ -99,7 +99,7 @@ HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry 
 # port and we bail out of this attempt early. Saves up to ~10 s of a stuck
 # descent + settle window on SFP.
 DEFAULT_STUCK_MIN_FRACTION = 0.3
-DEFAULT_STUCK_WINDOW_S = 1.5
+DEFAULT_STUCK_WINDOW_S = 1.0
 DEFAULT_STUCK_PROGRESS_M = 0.002
 
 # v8: final "release" message before insert_cable returns.
@@ -176,6 +176,17 @@ class CheatCodeMJ(CheatCode):
         )
         self._stuck_progress_m = float(
             parent_node.get_parameter("stuck_progress_m").value
+        )
+        # Time-between-attempts knobs (the wait-before-retry params).
+        if not parent_node.has_parameter("lift_time_frac"):
+            parent_node.declare_parameter("lift_time_frac", DEFAULT_LIFT_TIME_FRAC)
+        if not parent_node.has_parameter("hover_hold_s"):
+            parent_node.declare_parameter("hover_hold_s", DEFAULT_HOVER_HOLD_BETWEEN_ATTEMPTS_S)
+        self._lift_time_frac = float(
+            parent_node.get_parameter("lift_time_frac").value
+        )
+        self._hover_hold_s = float(
+            parent_node.get_parameter("hover_hold_s").value
         )
         self.get_logger().info(
             f"CheatCodeMJ params: insertion_threshold_m={self._insertion_threshold}, "
@@ -486,7 +497,7 @@ class CheatCodeMJ(CheatCode):
                 lift_traj = _scalar_trajectory(
                     -INSERTION_DEPTH,
                     approach_z_offset,
-                    descent_time * LIFT_TIME_FRAC,
+                    descent_time * self._lift_time_frac,
                 )
                 t0 = self.time_now()
                 while True:
@@ -510,7 +521,7 @@ class CheatCodeMJ(CheatCode):
                     self.sleep_for(dt)
 
                 # Brief steady-state at hover so any wobble from the lift dies.
-                self.sleep_for(HOVER_HOLD_BETWEEN_ATTEMPTS_S)
+                self.sleep_for(self._hover_hold_s)
 
                 # Re-snapshot port_tf — the live TF may have drifted between attempts.
                 try:
