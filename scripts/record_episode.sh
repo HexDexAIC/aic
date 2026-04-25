@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Record a single deterministic episode of the AIC eval into a LeRobot dataset.
+# Run one deterministic AIC trial and (optionally) record it to a LeRobot dataset.
 #
-# Launches the eval stack with one of the single-trial configs (sfp/sc) and
-# runs the TeleopAssist policy, which optionally adds keyboard teleop on top
-# of an inner policy and writes a LeRobotDataset to disk.
+# Spawns the engine + sim with a single-trial config, runs the chosen policy,
+# and runs `record_lerobot.py` in its own process to write the dataset.
+# Recording is bookended by /insert_cable/_action/status — the recorder
+# auto-starts on STATUS_EXECUTING (i.e. after the engine's arm-stabilization
+# wait, the moment the policy actually begins) and saves on terminal status.
 #
 # Usage:
 #   src/aic/scripts/record_episode.sh PORT [options]
@@ -11,61 +13,58 @@
 # PORT is "sfp" or "sc"; selects single_trial_<PORT>.yaml.
 #
 # Options:
-#   --inner POLICY        Inner policy class name (e.g. CheatCodeMJ, WaveArm,
-#                         RunACT). Default: WaveArm. Pure-teleop (no inner)
-#                         is no longer supported here — use
-#                         `pixi run lerobot-record` per
-#                         src/aic/aic_utils/lerobot_robot_aic/README.md.
-#   --no-teleop           Disable keyboard teleop (run inner policy unchanged,
-#                         still record). Default: teleop on.
-#   --no-record           Disable dataset recording (just run the policy).
-#   --dataset-root DIR    Base dir under which to create the dataset.
+#   --policy NAME         Policy class name from aic_example_policies.ros.
+#                         Default: CheatCodeMJ. CheatCode-family auto-enables
+#                         --ground-truth.
+#   --no-record           Skip the LeRobot recorder; just run the policy.
+#   --dataset-root DIR    Where to write the dataset.
 #                         Default: ~/ws_aic/aic_data.
 #   --task PROMPT         Task prompt string written into each frame.
 #                         Default: derived from PORT.
-#   --gui                 Launch Gazebo GUI client (default: OFF — laptop-friendly).
-#   --no-rviz             Skip RViz                (default: ON  — lightweight viz).
+#   --gui                 Launch Gazebo GUI client (default OFF — laptop-friendly).
+#   --no-rviz             Skip RViz (default ON — lightweight viz).
 #   --headless            --no-gui + --no-rviz (no viz at all).
 #   --no-gui              Explicit form of the default.
 #   --timeout SEC         Wall-clock timeout. Default: 300.
 #   --ready-wait SEC      Engine-ready wait. Default: 90.
-#   --ground-truth        Pass ground_truth:=true (needed if inner is CheatCode*).
+#   --save-grace SEC      Time after engine exits to let the recorder finish
+#                         encoding/saving. Default: 90.
+#   --ground-truth        Pass ground_truth:=true (auto-on for CheatCode*).
 #
 # Determinism: per [[spawn-determinism-from-yaml]], the engine spawn from a
 # fixed YAML is bit-deterministic for static scene and ≤0.05 mm for cable on
-# trial 1. Multi-trial runs accumulate arm drift — record one trial per
-# invocation to stay deterministic.
+# trial 1. One trial per invocation keeps the arm-state slate clean.
 
 set -euo pipefail
 
 PORT="${1:-}"
 if [[ -z "$PORT" || ( "$PORT" != "sfp" && "$PORT" != "sc" ) ]]; then
-    sed -n '2,30p' "$0" >&2
+    sed -n '2,33p' "$0" >&2
     exit 2
 fi
 shift
 
-INNER="WaveArm"
-ENABLE_TELEOP=1
+POLICY="CheatCodeMJ"
 ENABLE_RECORD=1
 DATASET_ROOT=""
 TASK_PROMPT=""
 GROUND_TRUTH=false
 RUN_TIMEOUT=300
 READY_WAIT=90
+SAVE_GRACE=90
 GAZEBO_GUI=false
 LAUNCH_RVIZ=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --inner)         INNER="$2"; shift 2 ;;
-        --no-teleop)     ENABLE_TELEOP=0; shift ;;
+        --policy)        POLICY="$2"; shift 2 ;;
         --no-record)     ENABLE_RECORD=0; shift ;;
         --dataset-root)  DATASET_ROOT="$2"; shift 2 ;;
         --task)          TASK_PROMPT="$2"; shift 2 ;;
         --ground-truth)  GROUND_TRUTH=true; shift ;;
         --timeout)       RUN_TIMEOUT="$2"; shift 2 ;;
         --ready-wait)    READY_WAIT="$2"; shift 2 ;;
+        --save-grace)    SAVE_GRACE="$2"; shift 2 ;;
         --gui)           GAZEBO_GUI=true; shift ;;
         --no-gui)        GAZEBO_GUI=false; shift ;;
         --no-rviz)       LAUNCH_RVIZ=false; shift ;;
@@ -93,22 +92,22 @@ OUTPUT_DIR="$WS/aic_results/recording_${TS}_${PORT}"
 mkdir -p "$OUTPUT_DIR"
 T1_LOG="$OUTPUT_DIR/terminal1_eval.log"
 T2_LOG="$OUTPUT_DIR/terminal2_policy.log"
+T3_LOG="$OUTPUT_DIR/terminal3_recorder.log"
 
 if [[ -z "$TASK_PROMPT" ]]; then
     TASK_PROMPT="insert ${PORT} cable"
 fi
 
 # CheatCode-family policies need ground-truth.
-if [[ "$INNER" == CheatCode* ]] && [[ "$GROUND_TRUTH" != "true" ]]; then
-    echo "INFO: inner=$INNER requires ground-truth — auto-enabling --ground-truth"
+if [[ "$POLICY" == CheatCode* ]] && [[ "$GROUND_TRUTH" != "true" ]]; then
+    echo "INFO: policy=$POLICY requires ground-truth — auto-enabling --ground-truth"
     GROUND_TRUTH=true
 fi
 
 export DBX_CONTAINER_MANAGER=docker
 
 echo "config:        $CONFIG"
-echo "inner policy:  $INNER"
-echo "teleop:        $([[ $ENABLE_TELEOP == 1 ]] && echo on || echo off)"
+echo "policy:        $POLICY"
 echo "record:        $([[ $ENABLE_RECORD == 1 ]] && echo "on  → $DATASET_ROOT" || echo off)"
 echo "ground_truth:  $GROUND_TRUTH"
 echo "task prompt:   '$TASK_PROMPT'"
@@ -122,7 +121,7 @@ if ! docker inspect aic_eval --format '{{.State.Running}}' 2>/dev/null | grep -q
 fi
 
 # Stale process cleanup (mirrors run_scoring_loop.sh's logic).
-STALE_PATTERN='aic_example_policies|/aic_model/aic_model|ros2 run aic_model'
+STALE_PATTERN='aic_example_policies|/aic_model/aic_model|ros2 run aic_model|record_lerobot'
 
 kill_policy_on_host() {
     if ! pgrep -f "$STALE_PATTERN" > /dev/null 2>&1; then return 0; fi
@@ -171,7 +170,7 @@ cleanup_container() {
 }
 
 if pgrep -f "$STALE_PATTERN" > /dev/null 2>&1; then
-    echo "Killing stale policy processes from a previous run..."
+    echo "Killing stale processes from a previous run..."
     kill_policy_on_host || true
 fi
 echo "Purging container-side stragglers..."
@@ -180,10 +179,9 @@ sleep 2
 
 START="$(date +%s)"
 
-# Terminal 1 — engine + sim.
-# Single-line bash -c with && chain matches the working pattern in
-# run_scoring_loop.sh; multi-line forms get flattened by distrobox's
-# wrapping and exec ends up parsed as another export arg.
+# ── Terminal 1 — engine + sim ────────────────────────────────────────────
+# Single-line bash -c with && chain matches run_scoring_loop.sh's pattern;
+# multi-line forms get flattened by distrobox's wrapping.
 (
     distrobox enter -r aic_eval -- \
         bash -c "export AIC_RESULTS_DIR='$OUTPUT_DIR' && exec /entrypoint.sh ground_truth:=$GROUND_TRUTH start_aic_engine:=true shutdown_on_aic_engine_exit:=true gazebo_gui:=$GAZEBO_GUI launch_rviz:=$LAUNCH_RVIZ aic_engine_config_file:='$CONFIG'"
@@ -210,27 +208,31 @@ if (( ready == 0 )); then
     echo "WARN: engine not ready after ${READY_WAIT}s — proceeding anyway"
 fi
 
-# Terminal 2 — policy in pixi with teleop/record env vars.
+# ── Terminal 2 — policy ───────────────────────────────────────────────────
 (
     cd "$SRC"
-    export INNER_POLICY="$INNER"
-    export ENABLE_TELEOP="$ENABLE_TELEOP"
-    if [[ "$ENABLE_RECORD" == "1" ]]; then
-        export RECORD_DATASET_PATH="$DATASET_ROOT"
-    fi
-    export RECORD_TASK_PROMPT="$TASK_PROMPT"
     exec pixi run ros2 run aic_model aic_model --ros-args \
         -p use_sim_time:=true \
-        -p policy:="aic_example_policies.ros.TeleopAssist"
+        -p policy:="aic_example_policies.ros.$POLICY"
 ) > "$T2_LOG" 2>&1 &
 T2_PID=$!
 
-echo "Recording in progress. Ctrl-C in this terminal to abort."
-echo "(Once Gazebo + the policy node are up and 'TeleopAssist.insert_cable enter'"
-echo " appears in the policy log, ESC inside the launch terminal will also stop"
-echo " the policy via the keyboard listener.)"
+# ── Terminal 3 — LeRobot recorder ─────────────────────────────────────────
+T3_PID=""
+if [[ "$ENABLE_RECORD" == "1" ]]; then
+    (
+        cd "$SRC"
+        exec pixi run python "$SRC/scripts/record_lerobot.py" \
+            --root "$DATASET_ROOT" \
+            --task "$TASK_PROMPT"
+    ) > "$T3_LOG" 2>&1 &
+    T3_PID=$!
+    echo "recorder:      pid $T3_PID, log $T3_LOG"
+fi
 
-# Wait for run to finish (T1 exit or scoring.yaml + grace).
+echo "Run in progress. Ctrl-C in this terminal to abort."
+
+# ── Wait for engine to complete ───────────────────────────────────────────
 POST_DONE_GRACE=15
 secs=0
 engine_done_at=0
@@ -242,7 +244,7 @@ while kill -0 "$T1_PID" 2>/dev/null && (( secs < RUN_TIMEOUT )); do
             echo "│  engine finished — giving launch ${POST_DONE_GRACE}s to tear down"
         fi
     elif (( secs - engine_done_at >= POST_DONE_GRACE )); then
-        echo "│  forcing teardown"
+        echo "│  forcing engine teardown"
         break
     fi
     sleep 2
@@ -258,10 +260,30 @@ if kill -0 "$T1_PID" 2>/dev/null; then
 fi
 wait "$T1_PID" 2>/dev/null || true
 
+# Stop the policy promptly — the trial is over either way.
 sleep 3
 kill_policy_on_host || true
-cleanup_container
 wait "$T2_PID" 2>/dev/null || true
+
+# ── Wait for the recorder to finish encoding/saving ──────────────────────
+if [[ -n "$T3_PID" ]]; then
+    if kill -0 "$T3_PID" 2>/dev/null; then
+        echo "│  waiting up to ${SAVE_GRACE}s for recorder to encode + save..."
+        secs=0
+        while kill -0 "$T3_PID" 2>/dev/null && (( secs < SAVE_GRACE )); do
+            sleep 2
+            secs=$((secs+2))
+        done
+        if kill -0 "$T3_PID" 2>/dev/null; then
+            echo "│  recorder still running after ${SAVE_GRACE}s — sending SIGINT"
+            kill -INT "$T3_PID" 2>/dev/null || true; sleep 5
+            kill -KILL "$T3_PID" 2>/dev/null || true
+        fi
+    fi
+    wait "$T3_PID" 2>/dev/null || true
+fi
+
+cleanup_container
 
 DURATION=$(( $(date +%s) - START ))
 echo
