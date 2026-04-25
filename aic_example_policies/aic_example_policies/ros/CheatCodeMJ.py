@@ -93,12 +93,17 @@ DEFAULT_LIFT_TIME_FRAC = 0.5  # lift back to hover takes this fraction of descen
 DEFAULT_HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry descent
 
 # Early-abort during descent. Sample plug-port distance every control tick;
-# once the sliding window has at least 0.9 × stuck_window_s of samples,
-# check whether the net distance change is below stuck_progress_m. If so,
-# the plug isn't getting closer to the real port and we bail out of this
-# attempt early. Detection can fire as soon as the first window is full
-# (no minimum-fraction gate — keep stuck_progress_m sensible for the
-# chosen stuck_window_s so the natural min-jerk ramp-up doesn't false-trigger).
+# once we're past stuck_min_fraction of the descent, look at the recent
+# stuck_window_s of samples — if the net distance change over that window
+# is less than stuck_progress_m, the plug isn't getting closer to the real
+# port and we bail out of this attempt early.
+#
+# stuck_min_fraction is REQUIRED to avoid false-triggering during the
+# min-jerk ramp-up: at fraction 0.10 of descent the plug has only moved
+# ~0.6mm — well below stuck_progress_m (2mm) — but it's healthy ramp-up
+# motion, not stuck. The gate prevents the algorithm from looking at the
+# pre-ramp window. Conservative default 0.3.
+DEFAULT_STUCK_MIN_FRACTION = 0.3
 DEFAULT_STUCK_WINDOW_S = 1.0
 DEFAULT_STUCK_PROGRESS_M = 0.002
 
@@ -162,10 +167,15 @@ class CheatCodeMJ(CheatCode):
             parent_node.get_parameter("bad_port_offset_y").value
         )
         # Stuck-detection params (early-abort during descent).
+        if not parent_node.has_parameter("stuck_min_fraction"):
+            parent_node.declare_parameter("stuck_min_fraction", DEFAULT_STUCK_MIN_FRACTION)
         if not parent_node.has_parameter("stuck_window_s"):
             parent_node.declare_parameter("stuck_window_s", DEFAULT_STUCK_WINDOW_S)
         if not parent_node.has_parameter("stuck_progress_m"):
             parent_node.declare_parameter("stuck_progress_m", DEFAULT_STUCK_PROGRESS_M)
+        self._stuck_min_fraction = float(
+            parent_node.get_parameter("stuck_min_fraction").value
+        )
         self._stuck_window_s = float(
             parent_node.get_parameter("stuck_window_s").value
         )
@@ -588,51 +598,48 @@ class CheatCodeMJ(CheatCode):
 
                 # ── Early-abort: distance to REAL port not decreasing ──
                 # Sample plug-port distance and accumulate a window. Once
-                # the window is full, check net progress; if below threshold,
-                # the plug isn't advancing toward the real port — bail out
-                # and let the retry path lift + try again.
-                try:
-                    plug_now = self._lookup("base_link", plug_frame)
-                    d = float(
-                        np.linalg.norm(
-                            np.array([
-                                plug_now.translation.x - real_port_xyz[0],
-                                plug_now.translation.y - real_port_xyz[1],
-                                plug_now.translation.z - real_port_xyz[2],
-                            ])
-                        )
-                    )
-                    stuck_distances.append((elapsed, d))
-                    cutoff = elapsed - self._stuck_window_s
-                    while stuck_distances and stuck_distances[0][0] < cutoff:
-                        stuck_distances.popleft()
-                    # Need a full window to evaluate (use 90% of nominal
-                    # to absorb the first-cycle jitter).
-                    window_span = stuck_distances[-1][0] - stuck_distances[0][0]
-                    if window_span >= self._stuck_window_s * 0.9:
-                        net_progress = (
-                            stuck_distances[0][1] - stuck_distances[-1][1]
-                        )
-                        current_dist = stuck_distances[-1][1]
-                        # Don't abort if we're already within insertion
-                        # threshold — the lack of progress is just the
-                        # natural min-jerk settle, not a stuck-on-board.
-                        already_seated = current_dist <= self._insertion_threshold
-                        if (not already_seated
-                                and net_progress < self._stuck_progress_m):
-                            fraction = elapsed / descent_traj.duration
-                            self.get_logger().warn(
-                                f"⚠ Stuck detected at t={elapsed:.2f}s "
-                                f"(fraction={fraction:.2f}, dist={current_dist * 1000:.2f}mm): "
-                                f"net progress over last {self._stuck_window_s:.1f}s = "
-                                f"{net_progress * 1000:+.2f}mm "
-                                f"(threshold={self._stuck_progress_m * 1000:.2f}mm) — "
-                                f"aborting descent"
+                # we're past the min-fraction guard and the window is full,
+                # check net progress; if below threshold, the plug isn't
+                # advancing toward the real port — bail out and let the
+                # retry path lift + try again.
+                fraction = elapsed / descent_traj.duration
+                if fraction > self._stuck_min_fraction:
+                    try:
+                        plug_now = self._lookup("base_link", plug_frame)
+                        d = float(
+                            np.linalg.norm(
+                                np.array([
+                                    plug_now.translation.x - real_port_xyz[0],
+                                    plug_now.translation.y - real_port_xyz[1],
+                                    plug_now.translation.z - real_port_xyz[2],
+                                ])
                             )
-                            stuck_detected = True
-                            break
-                except TransformException:
-                    pass
+                        )
+                        stuck_distances.append((elapsed, d))
+                        cutoff = elapsed - self._stuck_window_s
+                        while stuck_distances and stuck_distances[0][0] < cutoff:
+                            stuck_distances.popleft()
+                        window_span = stuck_distances[-1][0] - stuck_distances[0][0]
+                        if window_span >= self._stuck_window_s * 0.9:
+                            net_progress = (
+                                stuck_distances[0][1] - stuck_distances[-1][1]
+                            )
+                            current_dist = stuck_distances[-1][1]
+                            already_seated = current_dist <= self._insertion_threshold
+                            if (not already_seated
+                                    and net_progress < self._stuck_progress_m):
+                                self.get_logger().warn(
+                                    f"⚠ Stuck detected at t={elapsed:.2f}s "
+                                    f"(fraction={fraction:.2f}, dist={current_dist * 1000:.2f}mm): "
+                                    f"net progress over last {self._stuck_window_s:.1f}s = "
+                                    f"{net_progress * 1000:+.2f}mm "
+                                    f"(threshold={self._stuck_progress_m * 1000:.2f}mm) — "
+                                    f"aborting descent"
+                                )
+                                stuck_detected = True
+                                break
+                    except TransformException:
+                        pass
 
             # Settle — skipped on a stuck-aborted descent (we know it failed,
             # no point waiting another settle_time for the obvious).
