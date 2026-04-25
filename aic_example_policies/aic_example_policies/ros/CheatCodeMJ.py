@@ -160,11 +160,20 @@ class CheatCodeMJ(CheatCode):
             parent_node.declare_parameter("bad_port_offset_x", 0.0)
         if not parent_node.has_parameter("bad_port_offset_y"):
             parent_node.declare_parameter("bad_port_offset_y", 0.0)
+        if not parent_node.has_parameter("bad_offset_decay_per_retry"):
+            parent_node.declare_parameter("bad_offset_decay_per_retry", 1.0)
         self._bad_port_offset_x = float(
             parent_node.get_parameter("bad_port_offset_x").value
         )
         self._bad_port_offset_y = float(
             parent_node.get_parameter("bad_port_offset_y").value
+        )
+        # Multiplier applied to the bad offset on each retry. 1.0 = no decay
+        # (default), 0.5 = halve each retry, 0.0 = retries see real port.
+        # Useful for testing whether the retry path can recover from a
+        # progressively-easier failure.
+        self._bad_offset_decay_per_retry = float(
+            parent_node.get_parameter("bad_offset_decay_per_retry").value
         )
         # Stuck-detection params (early-abort during descent).
         if not parent_node.has_parameter("stuck_min_fraction"):
@@ -203,17 +212,29 @@ class CheatCodeMJ(CheatCode):
                 f"dy={self._bad_port_offset_y * 1000:.1f}mm — descent will aim off-target"
             )
 
-    def _apply_bad_offset(self, port_tf):
+    def _apply_bad_offset(self, port_tf, attempt: int = 0):
         """Mutate port_tf to add the configured XY offset (for retry testing).
 
         Default 0,0 is a no-op. The offset is applied to every refreshed
-        port_tf so all attempts see the same target shift. The insertion
-        check uses the REAL port pose (captured once at initial lookup),
-        so non-zero offsets reliably fail.
+        port_tf, scaled by ``bad_offset_decay_per_retry ** attempt`` so
+        retries can see a progressively-smaller offset. The insertion
+        check always uses the REAL port pose (captured once at initial
+        lookup), so non-zero offsets reliably fail; decay lets later
+        attempts succeed if the decay factor is < 1.
         """
-        if self._bad_port_offset_x != 0.0 or self._bad_port_offset_y != 0.0:
-            port_tf.translation.x += self._bad_port_offset_x
-            port_tf.translation.y += self._bad_port_offset_y
+        if self._bad_port_offset_x == 0.0 and self._bad_port_offset_y == 0.0:
+            return
+        scale = self._bad_offset_decay_per_retry ** attempt
+        offset_x = self._bad_port_offset_x * scale
+        offset_y = self._bad_port_offset_y * scale
+        port_tf.translation.x += offset_x
+        port_tf.translation.y += offset_y
+        if attempt > 0 and self._bad_offset_decay_per_retry != 1.0:
+            self.get_logger().info(
+                f"  bad-offset decayed for attempt {attempt + 1}: "
+                f"({offset_x * 1000:+.2f}mm, {offset_y * 1000:+.2f}mm) "
+                f"= scale {scale:.3f}"
+            )
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -551,7 +572,8 @@ class CheatCodeMJ(CheatCode):
                     port_tf = self._parent_node._tf_buffer.lookup_transform(
                         "base_link", port_frame, Time()
                     ).transform
-                    self._apply_bad_offset(port_tf)
+                    # Pass attempt so bad-offset decays across retries.
+                    self._apply_bad_offset(port_tf, attempt=attempt)
                     port_xyz = (
                         port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
                     )

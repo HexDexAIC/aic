@@ -35,6 +35,11 @@
 #                         port_tf so the descent aims off-target. Useful
 #                         for testing the retry loop. Default: 0.
 #   --bad-port-offset-y M  Same for Y. Default: 0.
+#   --bad-offset-decay D  Multiplier applied to the bad offset on each
+#                         retry. 1.0 = no decay (default), 0.5 = halve
+#                         each retry, 0.0 = retries see the real port.
+#                         Used to test whether the retry path can recover
+#                         from a progressively-easier failure.
 #   --stuck-min-fraction F Don't run stuck-detection until past this
 #                         fraction of the descent. Default: 0.3. Required
 #                         to avoid false-triggering on the natural min-jerk
@@ -81,6 +86,7 @@ INSERTION_THRESHOLD=""    # empty = use the policy's default
 MAX_RETRIES=""            # empty = use the policy's default
 BAD_PORT_OFFSET_X=""      # empty = no offset (default)
 BAD_PORT_OFFSET_Y=""      # empty = no offset (default)
+BAD_OFFSET_DECAY=""       # empty = use the policy's default (1.0 — no decay)
 STUCK_MIN_FRACTION=""     # empty = use the policy's default (0.3)
 STUCK_WINDOW_S=""         # empty = use the policy's default (1.0)
 STUCK_PROGRESS_M=""       # empty = use the policy's default (0.002)
@@ -105,6 +111,7 @@ while [[ $# -gt 0 ]]; do
         --max-retries)   MAX_RETRIES="$2"; shift 2 ;;
         --bad-port-offset-x) BAD_PORT_OFFSET_X="$2"; shift 2 ;;
         --bad-port-offset-y) BAD_PORT_OFFSET_Y="$2"; shift 2 ;;
+        --bad-offset-decay)  BAD_OFFSET_DECAY="$2"; shift 2 ;;
         --stuck-min-fraction) STUCK_MIN_FRACTION="$2"; shift 2 ;;
         --stuck-window-s)    STUCK_WINDOW_S="$2"; shift 2 ;;
         --stuck-progress-m)  STUCK_PROGRESS_M="$2"; shift 2 ;;
@@ -273,6 +280,9 @@ if [[ -n "$BAD_PORT_OFFSET_X" ]]; then
 fi
 if [[ -n "$BAD_PORT_OFFSET_Y" ]]; then
     POLICY_ARGS+=( -p bad_port_offset_y:=$BAD_PORT_OFFSET_Y )
+fi
+if [[ -n "$BAD_OFFSET_DECAY" ]]; then
+    POLICY_ARGS+=( -p bad_offset_decay_per_retry:=$BAD_OFFSET_DECAY )
 fi
 if [[ -n "$STUCK_MIN_FRACTION" ]]; then
     POLICY_ARGS+=( -p stuck_min_fraction:=$STUCK_MIN_FRACTION )
