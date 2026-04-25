@@ -27,11 +27,10 @@ Usage (typically launched by record_episode.sh alongside the policy):
 
     pixi run python src/aic/scripts/record_lerobot.py \
         --root ~/ws_aic/aic_data \
-        --task "insert sfp cable"
+        --task "insert sfp cable" \
+        [--vcodec h264] [--no-videos] [--multi] [--fps 20]
 
-Env vars (optional):
-    RECORD_VCODEC       video codec (default h264; libsvtav1 for smaller files)
-    RECORD_USE_VIDEOS   1/0 (default 1; set 0 for PNG-per-frame, fast finalize)
+Run with --help for the full flag list.
 """
 
 from __future__ import annotations
@@ -138,11 +137,17 @@ def image_msg_to_array(img_msg) -> np.ndarray:
 
 # ────────────────────── dataset wrapper ────────────────────────────────────
 class _Writer:
-    def __init__(self, root: Path, repo_id: str, fps: int, image_shape: tuple):
+    def __init__(
+        self,
+        root: Path,
+        repo_id: str,
+        fps: int,
+        image_shape: tuple,
+        vcodec: str = "h264",
+        use_videos: bool = True,
+    ):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-        vcodec = os.environ.get("RECORD_VCODEC", "h264")
-        use_videos = os.environ.get("RECORD_USE_VIDEOS", "1") == "1"
         h, w, _ = image_shape
 
         features = {
@@ -227,6 +232,8 @@ class AICAsyncRecorder(Node):
         task_prompt: str,
         fps: int,
         multi_episode: bool,
+        vcodec: str = "h264",
+        use_videos: bool = True,
     ):
         super().__init__("aic_async_recorder")
         self._dataset_root = dataset_root.expanduser()
@@ -234,6 +241,8 @@ class AICAsyncRecorder(Node):
         self._task_prompt = task_prompt
         self._fps = fps
         self._multi_episode = multi_episode
+        self._vcodec = vcodec
+        self._use_videos = use_videos
 
         self._lock = Lock()
         self._latest = _Latest()
@@ -308,7 +317,12 @@ class AICAsyncRecorder(Node):
         )
         try:
             self._writer = _Writer(
-                root=root, repo_id=repo_id, fps=self._fps, image_shape=(h, w, 3)
+                root=root,
+                repo_id=repo_id,
+                fps=self._fps,
+                image_shape=(h, w, 3),
+                vcodec=self._vcodec,
+                use_videos=self._use_videos,
             )
             return True
         except Exception as e:
@@ -388,6 +402,19 @@ def main(argv=None) -> int:
         help="Stay alive after the first episode terminates and record the "
         "next STATUS_EXECUTING window as a new episode (Ctrl-C to stop).",
     )
+    parser.add_argument(
+        "--vcodec",
+        default="h264",
+        help="Video codec for LeRobotDataset video features. Default 'h264' "
+        "(fast encode on consumer hardware). Use 'libsvtav1' for smaller "
+        "files but ~3x slower encoding.",
+    )
+    parser.add_argument(
+        "--no-videos",
+        action="store_true",
+        help="Store images as PNG-per-frame instead of MP4 video. Faster "
+        "save (no encoder), bigger disk.",
+    )
     args = parser.parse_args(argv)
 
     rclpy.init()
@@ -396,6 +423,8 @@ def main(argv=None) -> int:
         task_prompt=args.task,
         fps=args.fps,
         multi_episode=args.multi,
+        vcodec=args.vcodec,
+        use_videos=not args.no_videos,
     )
     try:
         while rclpy.ok() and not node.done:

@@ -21,6 +21,16 @@
 #                         Default: ~/ws_aic/aic_data.
 #   --task PROMPT         Task prompt string written into each frame.
 #                         Default: derived from PORT.
+#   --vcodec CODEC        Video codec for the dataset (default: h264).
+#                         Use libsvtav1 for smaller files (slower encode).
+#   --no-videos           Store images as PNG-per-frame instead of MP4
+#                         (skips encoding entirely; bigger disk).
+#   --insertion-threshold M
+#                         Plug-port distance threshold (m) below which
+#                         CheatCodeMJ considers an insertion successful.
+#                         Default: 0.005.
+#   --max-retries N       Max retry attempts for CheatCodeMJ if the first
+#                         descent doesn't seat. Default: 1.
 #   --gui                 Launch Gazebo GUI client (default OFF — laptop-friendly).
 #   --no-rviz             Skip RViz (default ON — lightweight viz).
 #   --headless            --no-gui + --no-rviz (no viz at all).
@@ -48,6 +58,10 @@ POLICY="CheatCodeMJ"
 ENABLE_RECORD=1
 DATASET_ROOT=""
 TASK_PROMPT=""
+VCODEC="h264"
+USE_VIDEOS=1
+INSERTION_THRESHOLD=""    # empty = use the policy's default
+MAX_RETRIES=""            # empty = use the policy's default
 GROUND_TRUTH=false
 RUN_TIMEOUT=300
 READY_WAIT=90
@@ -61,6 +75,10 @@ while [[ $# -gt 0 ]]; do
         --no-record)     ENABLE_RECORD=0; shift ;;
         --dataset-root)  DATASET_ROOT="$2"; shift 2 ;;
         --task)          TASK_PROMPT="$2"; shift 2 ;;
+        --vcodec)        VCODEC="$2"; shift 2 ;;
+        --no-videos)     USE_VIDEOS=0; shift ;;
+        --insertion-threshold) INSERTION_THRESHOLD="$2"; shift 2 ;;
+        --max-retries)   MAX_RETRIES="$2"; shift 2 ;;
         --ground-truth)  GROUND_TRUTH=true; shift ;;
         --timeout)       RUN_TIMEOUT="$2"; shift 2 ;;
         --ready-wait)    READY_WAIT="$2"; shift 2 ;;
@@ -209,22 +227,32 @@ if (( ready == 0 )); then
 fi
 
 # ── Terminal 2 — policy ───────────────────────────────────────────────────
+# Build the ROS-args parameter list, including any policy-specific overrides
+# (only emit -p flags when the user explicitly set them, so the policy's
+# declared defaults are otherwise used).
+POLICY_ARGS=( -p use_sim_time:=true -p policy:="aic_example_policies.ros.$POLICY" )
+if [[ -n "$INSERTION_THRESHOLD" ]]; then
+    POLICY_ARGS+=( -p insertion_threshold_m:=$INSERTION_THRESHOLD )
+fi
+if [[ -n "$MAX_RETRIES" ]]; then
+    POLICY_ARGS+=( -p max_insertion_retries:=$MAX_RETRIES )
+fi
 (
     cd "$SRC"
-    exec pixi run ros2 run aic_model aic_model --ros-args \
-        -p use_sim_time:=true \
-        -p policy:="aic_example_policies.ros.$POLICY"
+    exec pixi run ros2 run aic_model aic_model --ros-args "${POLICY_ARGS[@]}"
 ) > "$T2_LOG" 2>&1 &
 T2_PID=$!
 
 # ── Terminal 3 — LeRobot recorder ─────────────────────────────────────────
 T3_PID=""
 if [[ "$ENABLE_RECORD" == "1" ]]; then
+    RECORDER_ARGS=( --root "$DATASET_ROOT" --task "$TASK_PROMPT" --vcodec "$VCODEC" )
+    if [[ "$USE_VIDEOS" == "0" ]]; then
+        RECORDER_ARGS+=( --no-videos )
+    fi
     (
         cd "$SRC"
-        exec pixi run python "$SRC/scripts/record_lerobot.py" \
-            --root "$DATASET_ROOT" \
-            --task "$TASK_PROMPT"
+        exec pixi run python "$SRC/scripts/record_lerobot.py" "${RECORDER_ARGS[@]}"
     ) > "$T3_LOG" 2>&1 &
     T3_PID=$!
     echo "recorder:      pid $T3_PID, log $T3_LOG"

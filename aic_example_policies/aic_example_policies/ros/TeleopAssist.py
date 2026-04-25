@@ -28,57 +28,43 @@ Modes (toggled with SPACE / TAB / ESC):
               teleop deltas accumulate on top. Useful for fine positioning.
 - "stop"    — emergency: publish a hold and return False.
 
-If ``RECORD_DATASET_PATH`` is set to a directory, every commanded MotionUpdate
-is logged to a ``LeRobotDataset`` along with the latest observation. The
-schema follows the design rationale in
-``aic_wiki/wiki/methodology/recording-data.md`` — full observation state and
-the absolute commanded pose, leaving delta/6D-rotation/compliance derivation
-to a downstream training transform.
+If ``record_dataset_path`` (ROS param) is set to a directory, every commanded
+MotionUpdate is logged to a ``LeRobotDataset`` along with the latest
+observation. The episode auto-ends on a ``/scoring/insertion_event`` from
+the engine, after a configurable settling window. ESC also ends the
+episode at any time.
 
-The episode auto-ends on a ``/scoring/insertion_event`` from the engine,
-after a configurable settling window so the steady-state frames are
-captured. ESC also ends the episode at any time.
+(Note: the standalone recorder ``scripts/record_lerobot.py`` is the
+preferred recording path now — TeleopAssist is deferred and its embedded
+writer uses the older 7-D quat action schema. When TeleopAssist is
+revived, the writer block here will be ripped out and the standalone
+recorder will be run alongside.)
 
-Env vars
---------
-- ``INNER_POLICY``        — short class name from ``aic_example_policies.ros``
-                            (e.g. ``CheatCodeMJ``, ``WaveArm``). Default
-                            ``WaveArm``. (Pure-teleop ``none`` mode removed —
-                            use ``lerobot-record`` instead.)
-- ``ENABLE_TELEOP``       — ``1``/``0``. If ``0``, runs the inner policy alone
-                            (still records if ``RECORD_DATASET_PATH`` set).
-                            Default: ``1``.
-- ``AUTO_END_ON_INSERTION`` — ``1``/``0``. If ``1``, subscribe to
-                            ``/scoring/insertion_event`` and end the episode
-                            after a settling window once the engine reports
-                            insertion. Default ``1``.
-- ``INSERTION_SETTLE_SECONDS`` — extra seconds to record after the insertion
-                            event before exiting. Default ``1.0``.
-- ``UNPAUSE_BRIDGE_SECONDS`` — when transitioning pause → delta, cap the
-                            position rate-of-change toward the inner
-                            policy's target for this many seconds, so the
-                            arm doesn't teleport from the held pose to wherever
-                            the inner has advanced to. Default ``2.0``. The
-                            inner policy's clock kept running during pause —
-                            without this cap, unpausing during descent would
-                            jump the arm straight to the insertion pose.
-- ``UNPAUSE_MAX_LIN_VEL``  — linear velocity cap during the bridge (m/s).
-                            Default ``0.1``.
-- ``RECORD_DATASET_PATH`` — directory under which to create the LeRobot
-                            dataset. If unset, no recording.
-- ``RECORD_TASK_PROMPT``  — natural-language task string written into each
-                            frame. Default: derived from the InsertCable task.
-- ``TELEOP_LIN_RATE``     — keyboard linear rate (m/s). Default 0.04.
-- ``TELEOP_ANG_RATE``     — keyboard angular rate (rad/s). Default 0.5.
-- ``RECORD_VCODEC``       — video codec for LeRobot dataset (when
-                            videos are stored). Default ``h264`` —
-                            much faster than the LeRobot default
-                            ``libsvtav1`` on consumer laptops, at the
-                            cost of larger files. Set to ``libsvtav1``
-                            for the smaller archived files.
-- ``RECORD_USE_VIDEOS``   — ``1``/``0``. ``0`` stores PNGs per frame
-                            instead of MP4s. Avoids encoding entirely
-                            (fast finalize, big disk). Default ``1``.
+ROS parameters (set via ``ros2 run aic_model aic_model --ros-args -p name:=value``):
+
+- ``inner_policy``                — short class name (e.g. ``CheatCodeMJ``,
+                                    ``WaveArm``). Default ``WaveArm``.
+                                    ``"none"`` is unsupported (use
+                                    ``lerobot-record`` for pure teleop).
+- ``enable_teleop``               — bool. Default ``True``.
+- ``teleop_lin_rate``             — keyboard linear rate (m/s). Default 0.04.
+- ``teleop_ang_rate``             — keyboard angular rate (rad/s). Default 0.5.
+- ``auto_end_on_insertion``       — bool. Default ``True``.
+- ``insertion_settle_seconds``    — extra seconds after insertion event.
+                                    Default 1.0.
+- ``unpause_bridge_seconds``      — pause→delta rate-cap window (s).
+                                    Default 2.0. Without this, unpausing
+                                    teleports the arm to wherever the
+                                    inner policy's clock has advanced to.
+- ``unpause_max_lin_vel``         — linear velocity cap during bridge (m/s).
+                                    Default 0.1.
+- ``record_dataset_path``         — directory for the embedded writer. Empty
+                                    or unset = no recording. Prefer the
+                                    standalone recorder instead.
+- ``record_task_prompt``          — task string per frame. Empty → derived
+                                    from the InsertCable task.
+- ``record_vcodec``               — video codec. Default ``h264``.
+- ``record_use_videos``           — bool. Default ``True``.
 """
 
 from __future__ import annotations
@@ -230,11 +216,16 @@ class _DatasetWriter:
     disabled.
     """
 
-    def __init__(self, root: Path, repo_id: str, fps: int, image_shape: tuple):
+    def __init__(
+        self,
+        root: Path,
+        repo_id: str,
+        fps: int,
+        image_shape: tuple,
+        vcodec: str = "h264",
+        use_videos: bool = True,
+    ):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-        vcodec = os.environ.get("RECORD_VCODEC", "h264")
-        use_videos = os.environ.get("RECORD_USE_VIDEOS", "1") == "1"
 
         h, w, _c = image_shape
         features = {
@@ -316,16 +307,40 @@ class TeleopAssist(Policy):
         super().__init__(parent_node)
         log = self.get_logger()
 
-        # Load inner policy. INNER_POLICY=none was removed — pure teleop
+        # ── ROS parameters (replaces the prior env-var soup) ──
+        # Set via launch:
+        #   ros2 run aic_model aic_model --ros-args \
+        #       -p policy:=aic_example_policies.ros.TeleopAssist \
+        #       -p inner_policy:=CheatCodeMJ \
+        #       -p enable_teleop:=true ...
+        # All have safe defaults so the no-flag invocation still works.
+        def _p(name, default):
+            if not parent_node.has_parameter(name):
+                parent_node.declare_parameter(name, default)
+            return parent_node.get_parameter(name).value
+
+        inner_name = str(_p("inner_policy", "WaveArm"))
+        self._teleop_enabled = bool(_p("enable_teleop", True))
+        teleop_lin_rate = float(_p("teleop_lin_rate", 0.04))
+        teleop_ang_rate = float(_p("teleop_ang_rate", 0.5))
+        self._auto_end_on_insertion = bool(_p("auto_end_on_insertion", True))
+        self._settle_seconds = float(_p("insertion_settle_seconds", 1.0))
+        self._bridge_seconds = float(_p("unpause_bridge_seconds", 2.0))
+        self._bridge_max_lin_vel = float(_p("unpause_max_lin_vel", 0.1))
+        self._dataset_root = str(_p("record_dataset_path", "")) or None
+        self._task_prompt = str(_p("record_task_prompt", ""))
+        self._record_vcodec = str(_p("record_vcodec", "h264"))
+        self._record_use_videos = bool(_p("record_use_videos", True))
+
+        # Load inner policy. inner_policy="none" is unsupported — pure teleop
         # belongs in the lerobot-record flow (lerobot_robot_aic).
-        inner_name = os.environ.get("INNER_POLICY", "WaveArm")
         if inner_name == "none":
             log.fatal(
-                "INNER_POLICY=none is no longer supported. For pure teleop, "
-                "use `pixi run lerobot-record` with the aic_controller robot "
+                "inner_policy=none is not supported. For pure teleop, use "
+                "`pixi run lerobot-record` with the aic_controller robot "
                 "driver — see src/aic/aic_utils/lerobot_robot_aic/README.md."
             )
-            raise ValueError("INNER_POLICY=none is not supported")
+            raise ValueError("inner_policy=none is not supported")
         self._inner_policy_name = inner_name
         module_path = f"aic_example_policies.ros.{inner_name}"
         try:
@@ -339,26 +354,23 @@ class TeleopAssist(Policy):
         log.info(f"TeleopAssist: instantiating inner policy {inner_name}")
         self.inner = inner_cls(parent_node)
 
-        # Optional teleop.
-        self._teleop_enabled = os.environ.get("ENABLE_TELEOP", "1") == "1"
+        # Keyboard teleop (uses the rates resolved from ROS params above).
         self.teleop: Optional[KeyboardTeleop] = None
         if self._teleop_enabled:
             try:
-                self.teleop = KeyboardTeleop().start()
+                self.teleop = KeyboardTeleop(
+                    lin_rate_mps=teleop_lin_rate,
+                    ang_rate_rps=teleop_ang_rate,
+                ).start()
                 log.info("TeleopAssist: keyboard teleop active")
             except RuntimeError as e:
                 log.warn(f"TeleopAssist: keyboard teleop unavailable ({e}); inner only")
 
-        # Optional dataset recording. Lazy-initialize on insert_cable so we
-        # know fps + image shape from the first observation.
-        self._dataset_root = os.environ.get("RECORD_DATASET_PATH")
+        # Dataset writer is lazy-init'd on the first observation in insert_cable.
         self._writer: Optional[_DatasetWriter] = None
-        self._task_prompt = os.environ.get("RECORD_TASK_PROMPT", "")
 
-        # Auto-end-on-insertion config + state.
-        self._auto_end_on_insertion = os.environ.get("AUTO_END_ON_INSERTION", "1") == "1"
-        self._settle_seconds = float(os.environ.get("INSERTION_SETTLE_SECONDS", "1.0"))
-        self._insertion_seen_at: Optional[float] = None  # wall-clock seconds when /scoring/insertion_event arrived
+        # /scoring/insertion_event subscription for auto-end behavior.
+        self._insertion_seen_at: Optional[float] = None
         self._insertion_event_sub = None
         if self._auto_end_on_insertion:
             from std_msgs.msg import String
@@ -374,13 +386,9 @@ class TeleopAssist(Policy):
         self._last_motion_update: Optional[MotionUpdate] = None
         self._last_publish_time: float = 0.0
 
-        # Pause → delta bridging. The inner policy's clock keeps running
-        # during pause; without a bridge, unpausing teleports the arm to
-        # wherever the inner has advanced to in its trajectory.
+        # Pause → delta bridging.
         self._previous_teleop_mode: str = "delta"
         self._bridge_start_time: Optional[float] = None
-        self._bridge_seconds = float(os.environ.get("UNPAUSE_BRIDGE_SECONDS", "2.0"))
-        self._bridge_max_lin_vel = float(os.environ.get("UNPAUSE_MAX_LIN_VEL", "0.1"))
 
     def _on_insertion_event(self, msg) -> None:
         """Called when the engine publishes a /scoring/insertion_event."""
@@ -405,7 +413,14 @@ class TeleopAssist(Policy):
         )
         # FPS=20 matches the engine's observation→policy call rate floor; the
         # tolerance_s parameter in LeRobotDataset accommodates per-policy jitter.
-        self._writer = _DatasetWriter(root=root, repo_id=repo_id, fps=20, image_shape=(h, w, 3))
+        self._writer = _DatasetWriter(
+            root=root,
+            repo_id=repo_id,
+            fps=20,
+            image_shape=(h, w, 3),
+            vcodec=self._record_vcodec,
+            use_videos=self._record_use_videos,
+        )
 
     def _apply_teleop_delta(
         self, motion_update: MotionUpdate, dt: float

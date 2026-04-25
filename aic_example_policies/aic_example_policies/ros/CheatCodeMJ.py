@@ -84,10 +84,10 @@ CONTROL_RATE_HZ = 20.0
 # phase, measure plug-port distance via ground-truth TF; if it's below the
 # threshold the plug is considered seated. Otherwise lift back to hover,
 # re-snapshot port_tf, reset the XY integrator, and re-descend — up to
-# MAX_INSERTION_RETRIES additional attempts. Tunable via env vars so we
-# don't have to re-edit + reinstall to sweep.
-INSERTION_THRESHOLD_M = float(os.environ.get("INSERTION_THRESHOLD_M", "0.005"))
-MAX_INSERTION_RETRIES = int(os.environ.get("MAX_INSERTION_RETRIES", "1"))
+# max_insertion_retries additional attempts. Tunable via ROS parameters
+# declared in __init__ so we don't have to re-edit + reinstall to sweep.
+DEFAULT_INSERTION_THRESHOLD_M = 0.005
+DEFAULT_MAX_INSERTION_RETRIES = 1
 LIFT_TIME_FRAC = 0.5  # lift back to hover takes this fraction of descent_time
 HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry descent
 
@@ -114,6 +114,31 @@ def _scalar_trajectory(start: float, end: float, duration: float):
 
 class CheatCodeMJ(CheatCode):
     """CheatCode with trajectory-driven timing on interp_fraction and z_offset."""
+
+    def __init__(self, parent_node):
+        super().__init__(parent_node)
+        # ROS parameters — set at launch time via
+        #   ros2 run aic_model aic_model --ros-args \
+        #       -p insertion_threshold_m:=0.003 -p max_insertion_retries:=3
+        # Defaults are the values committed in the source above.
+        if not parent_node.has_parameter("insertion_threshold_m"):
+            parent_node.declare_parameter(
+                "insertion_threshold_m", DEFAULT_INSERTION_THRESHOLD_M
+            )
+        if not parent_node.has_parameter("max_insertion_retries"):
+            parent_node.declare_parameter(
+                "max_insertion_retries", DEFAULT_MAX_INSERTION_RETRIES
+            )
+        self._insertion_threshold = float(
+            parent_node.get_parameter("insertion_threshold_m").value
+        )
+        self._max_retries = int(
+            parent_node.get_parameter("max_insertion_retries").value
+        )
+        self.get_logger().info(
+            f"CheatCodeMJ params: insertion_threshold_m={self._insertion_threshold}, "
+            f"max_insertion_retries={self._max_retries}"
+        )
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -369,26 +394,26 @@ class CheatCodeMJ(CheatCode):
         # plug_xy correction exactly like CheatCode.
         #
         # After descent + settle we measure plug-port distance via ground-
-        # truth TF. If below INSERTION_THRESHOLD_M the plug is seated and
+        # truth TF. If below self._insertion_threshold the plug is seated and
         # we exit. Otherwise we lift back to hover, re-snapshot port_tf,
         # reset the XY integrator, and re-descend — up to
-        # MAX_INSERTION_RETRIES additional attempts.
+        # self._max_retries additional attempts.
         # ============================================================
         inserted = False
         final_dist: float | None = None
         last_z_offset = approach_z_offset
         attempts_used = 0
 
-        for attempt in range(MAX_INSERTION_RETRIES + 1):
+        for attempt in range(self._max_retries + 1):
             attempts_used = attempt + 1
 
             # Lift back to hover (skipped on first attempt — we're already
             # there from approach phase).
             if attempt > 0:
                 self.get_logger().info(
-                    f"Lifting back to hover for retry {attempt}/{MAX_INSERTION_RETRIES}"
+                    f"Lifting back to hover for retry {attempt}/{self._max_retries}"
                 )
-                send_feedback(f"insertion retry {attempt}/{MAX_INSERTION_RETRIES}: lifting")
+                send_feedback(f"insertion retry {attempt}/{self._max_retries}: lifting")
                 lift_traj = _scalar_trajectory(
                     -INSERTION_DEPTH,
                     approach_z_offset,
@@ -487,30 +512,30 @@ class CheatCodeMJ(CheatCode):
                 self.get_logger().warn(f"Final plug TF lookup failed: {ex}")
                 final_dist = None
 
-            if final_dist is not None and final_dist < INSERTION_THRESHOLD_M:
+            if final_dist is not None and final_dist < self._insertion_threshold:
                 inserted = True
                 self.get_logger().info(
                     f"✓ Insertion confirmed on attempt {attempt + 1}: "
-                    f"dist={final_dist * 1000:.2f}mm < threshold={INSERTION_THRESHOLD_M * 1000:.2f}mm"
+                    f"dist={final_dist * 1000:.2f}mm < threshold={self._insertion_threshold * 1000:.2f}mm"
                 )
                 self._write_summary(
                     summary, f"Attempt {attempt + 1} result",
                     inserted=True,
                     plug_port_distance_m=final_dist,
-                    threshold_m=INSERTION_THRESHOLD_M,
+                    threshold_m=self._insertion_threshold,
                 )
                 break
 
             dist_str = f"{final_dist * 1000:.2f}mm" if final_dist is not None else "unknown"
             self.get_logger().info(
                 f"✗ Attempt {attempt + 1} not inserted: "
-                f"dist={dist_str} (threshold={INSERTION_THRESHOLD_M * 1000:.2f}mm)"
+                f"dist={dist_str} (threshold={self._insertion_threshold * 1000:.2f}mm)"
             )
             self._write_summary(
                 summary, f"Attempt {attempt + 1} result",
                 inserted=False,
                 plug_port_distance_m=final_dist,
-                threshold_m=INSERTION_THRESHOLD_M,
+                threshold_m=self._insertion_threshold,
             )
 
         # Final summary + log line.
@@ -519,9 +544,9 @@ class CheatCodeMJ(CheatCode):
             "Final state",
             inserted=inserted,
             attempts_used=attempts_used,
-            max_attempts=MAX_INSERTION_RETRIES + 1,
+            max_attempts=self._max_retries + 1,
             plug_port_distance_m=final_dist,
-            insertion_threshold_m=INSERTION_THRESHOLD_M,
+            insertion_threshold_m=self._insertion_threshold,
             final_z_offset=last_z_offset,
             final_integrator_xy=(self._tip_x_error_integrator, self._tip_y_error_integrator),
         )

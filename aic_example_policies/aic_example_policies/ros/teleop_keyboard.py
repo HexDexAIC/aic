@@ -49,8 +49,8 @@ except ImportError:  # pragma: no cover - pynput is in pixi env
     keyboard = None  # type: ignore[assignment]
 
 
-DEFAULT_LIN_RATE_MPS = float(os.environ.get("TELEOP_LIN_RATE", "0.04"))
-DEFAULT_ANG_RATE_RPS = float(os.environ.get("TELEOP_ANG_RATE", "0.5"))
+DEFAULT_LIN_RATE_MPS = 0.04
+DEFAULT_ANG_RATE_RPS = 0.5
 
 
 @dataclass
