@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Split /fts_broadcaster/wrench by trial and plot per-trial force traces.
+"""Split /fts_broadcaster/wrench by trial and plot per-trial force / torque traces.
 
 Trial boundaries come from /insert_cable/_action/status (ACCEPTED / EXECUTING
 / SUCCEEDED / ABORTED transitions). Each trial gets its own subplot with
-||F||, Fx, Fy, Fz over time.
+||F||, Fx, Fy, Fz over time, and a parallel ||tau||, Tx, Ty, Tz plot.
 
 A summary table is printed: max / p95 / mean / sustained-over-threshold
 durations for each trial, useful for picking a contact-detection threshold.
 
-Saves `<bag_dir>/wrench_per_trial.png`.
+Saves `<bag_dir>/wrench_per_trial.png`, `<bag_dir>/torque_per_trial.png`,
+and `<bag_dir>/wrench_all6_per_trial.png` (forces and torques on twin y-axes).
 
 Run:
     scripts/.venv/bin/python scripts/plot_wrench_per_trial.py <bag_dir>
@@ -29,6 +30,7 @@ GOAL_STATUS = {0: "UNKNOWN", 1: "ACCEPTED", 2: "EXECUTING", 3: "CANCELING",
                4: "SUCCEEDED", 5: "CANCELED", 6: "ABORTED"}
 TRIAL_END_STATES = {"SUCCEEDED", "ABORTED", "CANCELED"}
 THRESHOLDS_N = [5.0, 10.0, 15.0, 20.0]
+THRESHOLDS_NM = [0.5, 1.0, 2.0, 5.0]
 
 
 @dataclass
@@ -110,10 +112,11 @@ def slice_trial(wt, wf, wtau, trial: Trial):
 
 
 def summarize(t, f, tau, threshold_dts):
-    """Return summary dict for one trial's wrench slice."""
+    """Return summary dict + magnitude arrays for one trial's wrench slice."""
     if len(t) == 0:
         return None
     mag = np.linalg.norm(f, axis=1)
+    tau_mag = np.linalg.norm(tau, axis=1)
     out = {
         "n_samples": len(t),
         "duration_s": float(t[-1] - t[0]) if len(t) > 1 else 0.0,
@@ -122,6 +125,10 @@ def summarize(t, f, tau, threshold_dts):
         "p50_N":  float(np.quantile(mag, 0.50)),
         "mean_N": float(mag.mean()),
         "baseline_N": float(mag[:20].mean()) if len(mag) >= 20 else float(mag[0]),
+        "max_Nm":  float(tau_mag.max()),
+        "p95_Nm":  float(np.quantile(tau_mag, 0.95)),
+        "mean_Nm": float(tau_mag.mean()),
+        "baseline_Nm": float(tau_mag[:20].mean()) if len(tau_mag) >= 20 else float(tau_mag[0]),
     }
     # sustained-above-threshold durations
     if len(t) > 1:
@@ -131,7 +138,7 @@ def summarize(t, f, tau, threshold_dts):
     for thr in THRESHOLDS_N:
         above = mag >= thr
         out[f"time_above_{int(thr)}N_s"] = float(dt[above].sum())
-    return out, mag
+    return out, mag, tau_mag
 
 
 def print_summary_table(summaries):
@@ -152,6 +159,23 @@ def print_summary_table(summaries):
             f"{s['p95_N']:.2f}",
             f"{s['mean_N']:.2f}",
             *[f"{s[f'time_above_{int(th)}N_s']:.2f}" for th in THRESHOLDS_N],
+        ))
+
+
+def print_torque_summary_table(summaries):
+    if not summaries:
+        return
+    headers = ["trial", "baseline_Nm", "max_Nm", "p95_Nm", "mean_Nm"]
+    fmt = "{:>6}  {:>11}  {:>7}  {:>7}  {:>8}"
+    print("\n" + fmt.format(*headers))
+    print("-" * (sum(len(h) + 2 for h in headers) + 6))
+    for s in summaries:
+        print(fmt.format(
+            f"{s['label']}",
+            f"{s['baseline_Nm']:.3f}",
+            f"{s['max_Nm']:.3f}",
+            f"{s['p95_Nm']:.3f}",
+            f"{s['mean_Nm']:.3f}",
         ))
 
 
@@ -183,6 +207,68 @@ def plot_per_trial(trials_data, out_path: Path):
     print(f"\nPlot saved: {out_path}")
 
 
+def plot_all6_per_trial(trials_data, out_path: Path):
+    """All 6 wrench components on twin y-axes per trial (N left, N·m right)."""
+    n = len(trials_data)
+    if n == 0:
+        return
+    fig, axes = plt.subplots(n, 1, figsize=(15, 3.6 * n), sharex=False)
+    if n == 1:
+        axes = [axes]
+    for ax_f, td in zip(axes, trials_data):
+        t, f, tau, label = td["t"], td["f"], td["tau"], td["label"]
+        ax_f.plot(t, f[:, 0], color="tab:red",   lw=0.8, alpha=0.85, label="Fx (N)")
+        ax_f.plot(t, f[:, 1], color="tab:green", lw=0.8, alpha=0.85, label="Fy (N)")
+        ax_f.plot(t, f[:, 2], color="tab:blue",  lw=0.8, alpha=0.85, label="Fz (N)")
+        ax_f.set_xlabel("t from trial start (s)")
+        ax_f.set_ylabel("Force (N)")
+        ax_f.grid(True, alpha=0.3)
+
+        ax_t = ax_f.twinx()
+        ax_t.plot(t, tau[:, 0], color="tab:red",   lw=0.8, ls="--", alpha=0.85, label="Tx (N·m)")
+        ax_t.plot(t, tau[:, 1], color="tab:green", lw=0.8, ls="--", alpha=0.85, label="Ty (N·m)")
+        ax_t.plot(t, tau[:, 2], color="tab:blue",  lw=0.8, ls="--", alpha=0.85, label="Tz (N·m)")
+        ax_t.set_ylabel("Torque (N·m)")
+
+        max_F = float(np.linalg.norm(f, axis=1).max())
+        max_T = float(np.linalg.norm(tau, axis=1).max())
+        ax_f.set_title(f"{label}  (max ||F|| {max_F:.2f} N, max ||tau|| {max_T:.3f} N·m)")
+
+        h_f, l_f = ax_f.get_legend_handles_labels()
+        h_t, l_t = ax_t.get_legend_handles_labels()
+        ax_f.legend(h_f + h_t, l_f + l_t, loc="upper left", fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=120)
+    print(f"Plot saved: {out_path}")
+
+
+def plot_torques_per_trial(trials_data, out_path: Path):
+    n = len(trials_data)
+    if n == 0:
+        return
+    fig, axes = plt.subplots(n, 1, figsize=(14, 3.2 * n), sharex=False)
+    if n == 1:
+        axes = [axes]
+    for ax, td in zip(axes, trials_data):
+        t, tau, tau_mag, label = td["t"], td["tau"], td["tau_mag"], td["label"]
+        ax.plot(t, tau_mag, color="black", lw=1.2, label="||tau||")
+        ax.plot(t, tau[:, 0], color="tab:red",   lw=0.6, alpha=0.7, label="Tx")
+        ax.plot(t, tau[:, 1], color="tab:green", lw=0.6, alpha=0.7, label="Ty")
+        ax.plot(t, tau[:, 2], color="tab:blue",  lw=0.6, alpha=0.7, label="Tz")
+        for thr, color in [(1.0, "#aa7722"), (2.0, "#aa2222")]:
+            ax.axhline(thr, color=color, ls="--", lw=0.6, alpha=0.5)
+            ax.text(t[-1] * 0.995, thr, f"{thr:g} N·m", va="bottom",
+                    ha="right", fontsize=7, color=color)
+        ax.set_title(f"{label}  (dur {t[-1]:.1f}s, max ||tau|| {tau_mag.max():.3f} N·m)")
+        ax.set_xlabel("t from trial start (s)")
+        ax.set_ylabel("N·m")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper left", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=120)
+    print(f"Plot saved: {out_path}")
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -206,14 +292,18 @@ def main(argv):
         res = summarize(t, f, tau, THRESHOLDS_N)
         if res is None:
             continue
-        s, mag = res
+        s, mag, tau_mag = res
         label = f"trial {tr.idx} ({tr.end_state})"
         s["label"] = f"t{tr.idx}"
         summaries.append(s)
-        trials_data.append({"t": t, "f": f, "mag": mag, "label": label})
+        trials_data.append({"t": t, "f": f, "mag": mag,
+                            "tau": tau, "tau_mag": tau_mag, "label": label})
 
     print_summary_table(summaries)
+    print_torque_summary_table(summaries)
     plot_per_trial(trials_data, bag_dir / "wrench_per_trial.png")
+    plot_torques_per_trial(trials_data, bag_dir / "torque_per_trial.png")
+    plot_all6_per_trial(trials_data, bag_dir / "wrench_all6_per_trial.png")
 
 
 if __name__ == "__main__":
