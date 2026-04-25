@@ -35,6 +35,7 @@
 import csv
 import datetime
 import os
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -90,6 +91,16 @@ DEFAULT_INSERTION_THRESHOLD_M = 0.005
 DEFAULT_MAX_INSERTION_RETRIES = 1
 LIFT_TIME_FRAC = 0.5  # lift back to hover takes this fraction of descent_time
 HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry descent
+
+# Early-abort during descent. Sample plug-port distance every control tick;
+# once we're past stuck_min_fraction of the descent, look at the recent
+# stuck_window_s of samples — if the net distance change over that window
+# is less than stuck_progress_m, the plug isn't getting closer to the real
+# port and we bail out of this attempt early. Saves up to ~10 s of a stuck
+# descent + settle window on SFP.
+DEFAULT_STUCK_MIN_FRACTION = 0.3
+DEFAULT_STUCK_WINDOW_S = 1.5
+DEFAULT_STUCK_PROGRESS_M = 0.002
 
 # v8: final "release" message before insert_cable returns.
 # aic_controller holds last_tool_reference_ through entity deletion; on cable
@@ -149,6 +160,22 @@ class CheatCodeMJ(CheatCode):
         )
         self._bad_port_offset_y = float(
             parent_node.get_parameter("bad_port_offset_y").value
+        )
+        # Stuck-detection params (early-abort during descent).
+        if not parent_node.has_parameter("stuck_min_fraction"):
+            parent_node.declare_parameter("stuck_min_fraction", DEFAULT_STUCK_MIN_FRACTION)
+        if not parent_node.has_parameter("stuck_window_s"):
+            parent_node.declare_parameter("stuck_window_s", DEFAULT_STUCK_WINDOW_S)
+        if not parent_node.has_parameter("stuck_progress_m"):
+            parent_node.declare_parameter("stuck_progress_m", DEFAULT_STUCK_PROGRESS_M)
+        self._stuck_min_fraction = float(
+            parent_node.get_parameter("stuck_min_fraction").value
+        )
+        self._stuck_window_s = float(
+            parent_node.get_parameter("stuck_window_s").value
+        )
+        self._stuck_progress_m = float(
+            parent_node.get_parameter("stuck_progress_m").value
         )
         self.get_logger().info(
             f"CheatCodeMJ params: insertion_threshold_m={self._insertion_threshold}, "
@@ -511,6 +538,8 @@ class CheatCodeMJ(CheatCode):
                 approach_z_offset, -INSERTION_DEPTH, descent_time
             )
             t0 = self.time_now()
+            stuck_distances: deque = deque()  # (elapsed, dist_to_real_port)
+            stuck_detected = False
             while True:
                 elapsed = (self.time_now() - t0).nanoseconds / 1e9
                 if elapsed >= descent_traj.duration:
@@ -533,11 +562,61 @@ class CheatCodeMJ(CheatCode):
                 self._log_row(writer, elapsed, phase_label, 1.0, z_offset, port_xyz)
                 self.sleep_for(dt)
 
-            # Settle.
-            self.get_logger().info(
-                f"Descent attempt {attempt + 1} complete, settling..."
-            )
-            self.sleep_for(settle_time)
+                # ── Early-abort: distance to REAL port not decreasing ──
+                # Sample plug-port distance and accumulate a window. Once
+                # we're past the min-fraction guard and the window is full,
+                # check net progress; if below threshold, the plug isn't
+                # advancing toward the real port — bail out and let the
+                # retry path lift + try again.
+                fraction = elapsed / descent_traj.duration
+                if fraction > self._stuck_min_fraction:
+                    try:
+                        plug_now = self._lookup("base_link", plug_frame)
+                        d = float(
+                            np.linalg.norm(
+                                np.array([
+                                    plug_now.translation.x - real_port_xyz[0],
+                                    plug_now.translation.y - real_port_xyz[1],
+                                    plug_now.translation.z - real_port_xyz[2],
+                                ])
+                            )
+                        )
+                        stuck_distances.append((elapsed, d))
+                        cutoff = elapsed - self._stuck_window_s
+                        while stuck_distances and stuck_distances[0][0] < cutoff:
+                            stuck_distances.popleft()
+                        # Need a full window to evaluate (use 90% of nominal
+                        # to absorb the first-cycle jitter).
+                        window_span = stuck_distances[-1][0] - stuck_distances[0][0]
+                        if window_span >= self._stuck_window_s * 0.9:
+                            net_progress = (
+                                stuck_distances[0][1] - stuck_distances[-1][1]
+                            )
+                            if net_progress < self._stuck_progress_m:
+                                self.get_logger().warn(
+                                    f"⚠ Stuck detected at t={elapsed:.2f}s "
+                                    f"(fraction={fraction:.2f}): "
+                                    f"net progress over last {self._stuck_window_s:.1f}s = "
+                                    f"{net_progress * 1000:+.2f}mm "
+                                    f"(threshold={self._stuck_progress_m * 1000:.2f}mm) — "
+                                    f"aborting descent"
+                                )
+                                stuck_detected = True
+                                break
+                    except TransformException:
+                        pass
+
+            # Settle — skipped on a stuck-aborted descent (we know it failed,
+            # no point waiting another settle_time for the obvious).
+            if stuck_detected:
+                self.get_logger().info(
+                    f"Descent attempt {attempt + 1} aborted (stuck); skipping settle."
+                )
+            else:
+                self.get_logger().info(
+                    f"Descent attempt {attempt + 1} complete, settling..."
+                )
+                self.sleep_for(settle_time)
 
             # Insertion check via plug-port distance — use the REAL port pose
             # captured before any bad-offset injection, so a deliberately-bad

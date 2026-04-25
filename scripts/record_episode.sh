@@ -35,6 +35,12 @@
 #                         port_tf so the descent aims off-target. Useful
 #                         for testing the retry loop. Default: 0.
 #   --bad-port-offset-y M  Same for Y. Default: 0.
+#   --stuck-min-fraction F Don't check stuck-detection until past this
+#                         fraction of the descent. Default: 0.3.
+#   --stuck-window-s S    Look-back window (s) for stuck progress check.
+#                         Default: 1.5.
+#   --stuck-progress-m M  Min net distance reduction over the window to
+#                         keep going. Default: 0.002.
 #   --gui                 Launch Gazebo GUI client (default OFF — laptop-friendly).
 #   --no-rviz             Skip RViz (default ON — lightweight viz).
 #   --headless            --no-gui + --no-rviz (no viz at all).
@@ -68,6 +74,9 @@ INSERTION_THRESHOLD=""    # empty = use the policy's default
 MAX_RETRIES=""            # empty = use the policy's default
 BAD_PORT_OFFSET_X=""      # empty = no offset (default)
 BAD_PORT_OFFSET_Y=""      # empty = no offset (default)
+STUCK_MIN_FRACTION=""     # empty = use the policy's default (0.3)
+STUCK_WINDOW_S=""         # empty = use the policy's default (1.5)
+STUCK_PROGRESS_M=""       # empty = use the policy's default (0.002)
 GROUND_TRUTH=false
 RUN_TIMEOUT=300
 READY_WAIT=90
@@ -87,6 +96,9 @@ while [[ $# -gt 0 ]]; do
         --max-retries)   MAX_RETRIES="$2"; shift 2 ;;
         --bad-port-offset-x) BAD_PORT_OFFSET_X="$2"; shift 2 ;;
         --bad-port-offset-y) BAD_PORT_OFFSET_Y="$2"; shift 2 ;;
+        --stuck-min-fraction) STUCK_MIN_FRACTION="$2"; shift 2 ;;
+        --stuck-window-s)    STUCK_WINDOW_S="$2"; shift 2 ;;
+        --stuck-progress-m)  STUCK_PROGRESS_M="$2"; shift 2 ;;
         --ground-truth)  GROUND_TRUTH=true; shift ;;
         --timeout)       RUN_TIMEOUT="$2"; shift 2 ;;
         --ready-wait)    READY_WAIT="$2"; shift 2 ;;
@@ -250,6 +262,15 @@ if [[ -n "$BAD_PORT_OFFSET_X" ]]; then
 fi
 if [[ -n "$BAD_PORT_OFFSET_Y" ]]; then
     POLICY_ARGS+=( -p bad_port_offset_y:=$BAD_PORT_OFFSET_Y )
+fi
+if [[ -n "$STUCK_MIN_FRACTION" ]]; then
+    POLICY_ARGS+=( -p stuck_min_fraction:=$STUCK_MIN_FRACTION )
+fi
+if [[ -n "$STUCK_WINDOW_S" ]]; then
+    POLICY_ARGS+=( -p stuck_window_s:=$STUCK_WINDOW_S )
+fi
+if [[ -n "$STUCK_PROGRESS_M" ]]; then
+    POLICY_ARGS+=( -p stuck_progress_m:=$STUCK_PROGRESS_M )
 fi
 (
     cd "$SRC"
