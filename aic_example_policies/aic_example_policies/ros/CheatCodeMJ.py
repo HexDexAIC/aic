@@ -88,9 +88,19 @@ CONTROL_RATE_HZ = 20.0
 # max_insertion_retries additional attempts. Tunable via ROS parameters
 # declared in __init__ so we don't have to re-edit + reinstall to sweep.
 DEFAULT_INSERTION_THRESHOLD_M = 0.005
-DEFAULT_MAX_INSERTION_RETRIES = 1
+DEFAULT_MAX_INSERTION_RETRIES = 2  # 1 initial + 2 retries = 3 attempts
 DEFAULT_LIFT_TIME_FRAC = 0.5  # lift back to hover takes this fraction of descent_time
 DEFAULT_HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry descent
+
+# Bad-offset injection defaults. Non-zero by default so the retry path is
+# exercised on every run — useful while we iterate on the algorithm.
+# Override with -p bad_port_offset_x:=0.0 (or `--bad-port-offset-x 0`) to
+# disable. Decay <1 lets later retries see a smaller offset → exercises
+# the "retry recovers" path; 1.0 means all attempts see the full offset
+# (all-fail testing).
+DEFAULT_BAD_PORT_OFFSET_X = 0.002
+DEFAULT_BAD_PORT_OFFSET_Y = 0.0
+DEFAULT_BAD_OFFSET_DECAY_PER_RETRY = 0.5
 
 # Early-abort during descent. Sample plug-port distance every control tick;
 # once we're past stuck_min_fraction of the descent, look at the recent
@@ -103,7 +113,7 @@ DEFAULT_HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover befor
 # ~0.6mm — well below stuck_progress_m (2mm) — but it's healthy ramp-up
 # motion, not stuck. The gate prevents the algorithm from looking at the
 # pre-ramp window. Conservative default 0.3.
-DEFAULT_STUCK_MIN_FRACTION = 0.3
+DEFAULT_STUCK_MIN_FRACTION = 0.2
 DEFAULT_STUCK_WINDOW_S = 1.0
 DEFAULT_STUCK_PROGRESS_M = 0.002
 
@@ -157,11 +167,13 @@ class CheatCodeMJ(CheatCode):
         # the REAL port pose, so a non-zero offset reliably fails — useful
         # for verifying the retry loop fires + the lift trajectory works.
         if not parent_node.has_parameter("bad_port_offset_x"):
-            parent_node.declare_parameter("bad_port_offset_x", 0.0)
+            parent_node.declare_parameter("bad_port_offset_x", DEFAULT_BAD_PORT_OFFSET_X)
         if not parent_node.has_parameter("bad_port_offset_y"):
-            parent_node.declare_parameter("bad_port_offset_y", 0.0)
+            parent_node.declare_parameter("bad_port_offset_y", DEFAULT_BAD_PORT_OFFSET_Y)
         if not parent_node.has_parameter("bad_offset_decay_per_retry"):
-            parent_node.declare_parameter("bad_offset_decay_per_retry", 1.0)
+            parent_node.declare_parameter(
+                "bad_offset_decay_per_retry", DEFAULT_BAD_OFFSET_DECAY_PER_RETRY
+            )
         self._bad_port_offset_x = float(
             parent_node.get_parameter("bad_port_offset_x").value
         )
