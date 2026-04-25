@@ -80,6 +80,17 @@ SETTLE_TIME_SFP = 1.5
 SETTLE_TIME_SC  = 2.0              # v4: 2.0 kept
 CONTROL_RATE_HZ = 20.0
 
+# v10: insertion success detection + retry. After the descent-then-settle
+# phase, measure plug-port distance via ground-truth TF; if it's below the
+# threshold the plug is considered seated. Otherwise lift back to hover,
+# re-snapshot port_tf, reset the XY integrator, and re-descend — up to
+# MAX_INSERTION_RETRIES additional attempts. Tunable via env vars so we
+# don't have to re-edit + reinstall to sweep.
+INSERTION_THRESHOLD_M = float(os.environ.get("INSERTION_THRESHOLD_M", "0.005"))
+MAX_INSERTION_RETRIES = int(os.environ.get("MAX_INSERTION_RETRIES", "1"))
+LIFT_TIME_FRAC = 0.5  # lift back to hover takes this fraction of descent_time
+HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry descent
+
 # v8: final "release" message before insert_cable returns.
 # aic_controller holds last_tool_reference_ through entity deletion; on cable
 # delete the impedance loop jolts toward that stale target. Publishing a
@@ -351,70 +362,183 @@ class CheatCodeMJ(CheatCode):
             self.get_logger().warn(f"Post-approach port TF refresh failed, keeping snapshot: {ex}")
 
         # ============================================================
-        # Phase B — descent: z_offset goes APPROACH_Z_OFFSET → -INSERTION_DEPTH
-        # on min-jerk. interp_fraction is pinned at 1 (orientation already
-        # aligned). XY integrator active: calc_gripper_pose applies live
-        # port_xy vs plug_xy correction exactly like CheatCode.
+        # Phase B — descent + (settle, check, optionally retry)
+        # z_offset goes APPROACH_Z_OFFSET → -INSERTION_DEPTH on min-jerk.
+        # interp_fraction pinned at 1 (orientation already aligned). XY
+        # integrator active: calc_gripper_pose applies live port_xy vs
+        # plug_xy correction exactly like CheatCode.
+        #
+        # After descent + settle we measure plug-port distance via ground-
+        # truth TF. If below INSERTION_THRESHOLD_M the plug is seated and
+        # we exit. Otherwise we lift back to hover, re-snapshot port_tf,
+        # reset the XY integrator, and re-descend — up to
+        # MAX_INSERTION_RETRIES additional attempts.
         # ============================================================
-        descent_traj = _scalar_trajectory(
-            approach_z_offset, -INSERTION_DEPTH, descent_time
-        )
-        t0 = self.time_now()
+        inserted = False
+        final_dist: float | None = None
         last_z_offset = approach_z_offset
-        while True:
-            elapsed = (self.time_now() - t0).nanoseconds / 1e9
-            if elapsed >= descent_traj.duration:
-                break
-            z, _, _ = descent_traj.get_state(elapsed)
-            z_offset = float(z[0])
-            last_z_offset = z_offset
+        attempts_used = 0
+
+        for attempt in range(MAX_INSERTION_RETRIES + 1):
+            attempts_used = attempt + 1
+
+            # Lift back to hover (skipped on first attempt — we're already
+            # there from approach phase).
+            if attempt > 0:
+                self.get_logger().info(
+                    f"Lifting back to hover for retry {attempt}/{MAX_INSERTION_RETRIES}"
+                )
+                send_feedback(f"insertion retry {attempt}/{MAX_INSERTION_RETRIES}: lifting")
+                lift_traj = _scalar_trajectory(
+                    -INSERTION_DEPTH,
+                    approach_z_offset,
+                    descent_time * LIFT_TIME_FRAC,
+                )
+                t0 = self.time_now()
+                while True:
+                    elapsed = (self.time_now() - t0).nanoseconds / 1e9
+                    if elapsed >= lift_traj.duration:
+                        break
+                    z, _, _ = lift_traj.get_state(elapsed)
+                    z_offset = float(z[0])
+                    try:
+                        pose = self.calc_gripper_pose(
+                            port_tf,
+                            slerp_fraction=1.0,
+                            position_fraction=1.0,
+                            z_offset=z_offset,
+                            reset_xy_integrator=True,  # zero out integrator during lift
+                        )
+                        self.set_pose_target(move_robot=move_robot, pose=pose)
+                    except TransformException as ex:
+                        self.get_logger().warn(f"Lift TF lookup failed: {ex}")
+                    self._log_row(writer, elapsed, f"lift_{attempt}", 1.0, z_offset, port_xyz)
+                    self.sleep_for(dt)
+
+                # Brief steady-state at hover so any wobble from the lift dies.
+                self.sleep_for(HOVER_HOLD_BETWEEN_ATTEMPTS_S)
+
+                # Re-snapshot port_tf — the live TF may have drifted between attempts.
+                try:
+                    port_tf = self._parent_node._tf_buffer.lookup_transform(
+                        "base_link", port_frame, Time()
+                    ).transform
+                    port_xyz = (
+                        port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
+                    )
+                    self._write_summary(
+                        summary, f"Port TF refresh (retry {attempt})",
+                        port_xyz=port_xyz,
+                    )
+                except TransformException as ex:
+                    self.get_logger().warn(f"Retry port TF refresh failed, keeping snapshot: {ex}")
+
+                # Reset XY integrator — explicit even though the lift's
+                # reset_xy_integrator=True already did this. Belt-and-suspenders.
+                self._tip_x_error_integrator = 0.0
+                self._tip_y_error_integrator = 0.0
+
+            # Descent
+            descent_traj = _scalar_trajectory(
+                approach_z_offset, -INSERTION_DEPTH, descent_time
+            )
+            t0 = self.time_now()
+            while True:
+                elapsed = (self.time_now() - t0).nanoseconds / 1e9
+                if elapsed >= descent_traj.duration:
+                    break
+                z, _, _ = descent_traj.get_state(elapsed)
+                z_offset = float(z[0])
+                last_z_offset = z_offset
+                try:
+                    pose = self.calc_gripper_pose(
+                        port_tf,
+                        slerp_fraction=1.0,
+                        position_fraction=1.0,
+                        z_offset=z_offset,
+                        reset_xy_integrator=False,
+                    )
+                    self.set_pose_target(move_robot=move_robot, pose=pose)
+                except TransformException as ex:
+                    self.get_logger().warn(f"Descent TF lookup failed: {ex}")
+                phase_label = "descent" if attempt == 0 else f"descent_retry_{attempt}"
+                self._log_row(writer, elapsed, phase_label, 1.0, z_offset, port_xyz)
+                self.sleep_for(dt)
+
+            # Settle.
+            self.get_logger().info(
+                f"Descent attempt {attempt + 1} complete, settling..."
+            )
+            self.sleep_for(settle_time)
+
+            # Insertion check via plug-port distance.
             try:
-                pose = self.calc_gripper_pose(
-                    port_tf,
-                    slerp_fraction=1.0,
-                    position_fraction=1.0,
-                    z_offset=z_offset,
-                    reset_xy_integrator=False,
+                plug_final = self._lookup("base_link", plug_frame)
+                final_dist = float(
+                    np.linalg.norm(
+                        np.array([
+                            plug_final.translation.x - port_xyz[0],
+                            plug_final.translation.y - port_xyz[1],
+                            plug_final.translation.z - port_xyz[2],
+                        ])
+                    )
                 )
-                self.set_pose_target(move_robot=move_robot, pose=pose)
             except TransformException as ex:
-                self.get_logger().warn(f"Descent TF lookup failed: {ex}")
-            self._log_row(writer, elapsed, "descent", 1.0, z_offset, port_xyz)
-            self.sleep_for(dt)
+                self.get_logger().warn(f"Final plug TF lookup failed: {ex}")
+                final_dist = None
 
-        # Settle at the final z_offset.
-        self.get_logger().info("Descent complete, settling...")
-        self.sleep_for(settle_time)
-
-        # Final snapshot
-        try:
-            plug_final = self._lookup("base_link", plug_frame)
-            plug_port_distance = float(
-                np.linalg.norm(
-                    np.array([
-                        plug_final.translation.x - port_xyz[0],
-                        plug_final.translation.y - port_xyz[1],
-                        plug_final.translation.z - port_xyz[2],
-                    ])
+            if final_dist is not None and final_dist < INSERTION_THRESHOLD_M:
+                inserted = True
+                self.get_logger().info(
+                    f"✓ Insertion confirmed on attempt {attempt + 1}: "
+                    f"dist={final_dist * 1000:.2f}mm < threshold={INSERTION_THRESHOLD_M * 1000:.2f}mm"
                 )
+                self._write_summary(
+                    summary, f"Attempt {attempt + 1} result",
+                    inserted=True,
+                    plug_port_distance_m=final_dist,
+                    threshold_m=INSERTION_THRESHOLD_M,
+                )
+                break
+
+            dist_str = f"{final_dist * 1000:.2f}mm" if final_dist is not None else "unknown"
+            self.get_logger().info(
+                f"✗ Attempt {attempt + 1} not inserted: "
+                f"dist={dist_str} (threshold={INSERTION_THRESHOLD_M * 1000:.2f}mm)"
             )
             self._write_summary(
-                summary,
-                "Final state",
-                final_plug_xyz=(plug_final.translation.x, plug_final.translation.y, plug_final.translation.z),
-                plug_port_distance_m=plug_port_distance,
-                final_z_offset=last_z_offset,
-                final_integrator_xy=(self._tip_x_error_integrator, self._tip_y_error_integrator),
+                summary, f"Attempt {attempt + 1} result",
+                inserted=False,
+                plug_port_distance_m=final_dist,
+                threshold_m=INSERTION_THRESHOLD_M,
             )
+
+        # Final summary + log line.
+        self._write_summary(
+            summary,
+            "Final state",
+            inserted=inserted,
+            attempts_used=attempts_used,
+            max_attempts=MAX_INSERTION_RETRIES + 1,
+            plug_port_distance_m=final_dist,
+            insertion_threshold_m=INSERTION_THRESHOLD_M,
+            final_z_offset=last_z_offset,
+            final_integrator_xy=(self._tip_x_error_integrator, self._tip_y_error_integrator),
+        )
+        if final_dist is not None:
             self.get_logger().info(
-                f"CheatCodeMJ done. plug-port dist: {plug_port_distance:.4f}m"
+                f"CheatCodeMJ done. inserted={inserted}, "
+                f"plug-port dist: {final_dist:.4f}m, attempts={attempts_used}"
             )
-        except TransformException:
-            pass
+        else:
+            self.get_logger().info(
+                f"CheatCodeMJ done. inserted={inserted}, "
+                f"plug-port dist: unknown, attempts={attempts_used}"
+            )
 
         self._publish_release_hold(move_robot)
 
         if summary: summary.close()
         if csvf: csvf.close()
 
-        return True
+        return inserted
