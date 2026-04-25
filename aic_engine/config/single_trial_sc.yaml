@@ -137,7 +137,7 @@ trials:
         port_type: "sc"
         port_name: "sc_port_base"
         target_module_name: "sc_port_1"
-        time_limit: 180
+        time_limit: 600
 
 robot:
   home_joint_positions:

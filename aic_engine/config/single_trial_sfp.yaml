@@ -152,7 +152,7 @@ trials:
         port_type: "sfp"
         port_name: "sfp_port_0"
         target_module_name: "nic_card_mount_0"
-        time_limit: 180
+        time_limit: 600
 
 robot:
   home_joint_positions:

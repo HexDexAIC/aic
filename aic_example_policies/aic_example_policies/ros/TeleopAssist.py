@@ -41,6 +41,9 @@ Env vars
                             frame. Default: derived from the InsertCable task.
 - ``TELEOP_LIN_RATE``     — keyboard linear rate (m/s). Default 0.04.
 - ``TELEOP_ANG_RATE``     — keyboard angular rate (rad/s). Default 0.5.
+- ``TELEOP_HOLD_SECONDS`` — when ``INNER_POLICY=none``, how long the
+                            self-loop runs before exiting. Default 300.
+                            Press ESC to exit early.
 """
 
 from __future__ import annotations
@@ -419,9 +422,11 @@ class TeleopAssist(Policy):
         wrapped_move_robot: MoveRobotCallback,
         send_feedback: SendFeedbackCallback,
     ) -> bool:
-        """Hold the current TCP pose; teleop drives. Runs ~30 s like other policies."""
-        # Wait for first observation.
+        """Hold the current TCP pose; teleop drives. Duration via TELEOP_HOLD_SECONDS env (default 300)."""
         log = self.get_logger()
+        hold_seconds = float(os.environ.get("TELEOP_HOLD_SECONDS", "300"))
+
+        # Wait for first observation.
         deadline = time.time() + 5.0
         obs = get_observation()
         while obs is None and time.time() < deadline:
@@ -445,8 +450,19 @@ class TeleopAssist(Policy):
         # Publish once to establish hold pose.
         wrapped_move_robot(motion_update=seed)
 
+        log.info(
+            "============================================================\n"
+            "  TELEOP READY — focus the launch terminal and press keys\n"
+            "    W/S A/D R/F  → linear xyz       (~40 mm/s)\n"
+            "    Q/E I/K J/L  → yaw / pitch / roll (~28 deg/s)\n"
+            "    SPACE        → toggle pause mode\n"
+            "    ESC          → stop and exit\n"
+            f"  Holding pose for up to {hold_seconds:.0f} s\n"
+            "============================================================"
+        )
+
         loop_dt = 0.05  # 20 Hz
-        end_time = time.time() + 30.0
+        end_time = time.time() + hold_seconds
         while time.time() < end_time:
             time.sleep(loop_dt)
             mu = self.set_pose_target_via_motion_update(

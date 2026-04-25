@@ -21,9 +21,10 @@
 #                         Default: ~/ws_aic/aic_data.
 #   --task PROMPT         Task prompt string written into each frame.
 #                         Default: derived from PORT.
-#   --no-gui              Skip Gazebo GUI client.
-#   --no-rviz             Skip RViz.
-#   --headless            --no-gui + --no-rviz.
+#   --gui                 Launch Gazebo GUI client (default: OFF — laptop-friendly).
+#   --no-rviz             Skip RViz                (default: ON  — lightweight viz).
+#   --headless            --no-gui + --no-rviz (no viz at all).
+#   --no-gui              Explicit form of the default.
 #   --timeout SEC         Wall-clock timeout. Default: 300.
 #   --ready-wait SEC      Engine-ready wait. Default: 90.
 #   --ground-truth        Pass ground_truth:=true (needed if inner is CheatCode*).
@@ -50,7 +51,7 @@ TASK_PROMPT=""
 GROUND_TRUTH=false
 RUN_TIMEOUT=300
 READY_WAIT=90
-GAZEBO_GUI=true
+GAZEBO_GUI=false
 LAUNCH_RVIZ=true
 
 while [[ $# -gt 0 ]]; do
@@ -63,6 +64,7 @@ while [[ $# -gt 0 ]]; do
         --ground-truth)  GROUND_TRUTH=true; shift ;;
         --timeout)       RUN_TIMEOUT="$2"; shift 2 ;;
         --ready-wait)    READY_WAIT="$2"; shift 2 ;;
+        --gui)           GAZEBO_GUI=true; shift ;;
         --no-gui)        GAZEBO_GUI=false; shift ;;
         --no-rviz)       LAUNCH_RVIZ=false; shift ;;
         --headless)      GAZEBO_GUI=false; LAUNCH_RVIZ=false; shift ;;
@@ -159,10 +161,10 @@ done
 true
 CLEANUP_EOF
 chmod +x "$CLEANUP_SCRIPT"
-trap "rm -f '$CLEANUP_SCRIPT' 2>/dev/null || true; kill_policy_on_host; docker exec aic_eval '$CLEANUP_SCRIPT' 2>/dev/null || true" EXIT
+trap "rm -f '$CLEANUP_SCRIPT' 2>/dev/null || true" EXIT
 
 cleanup_container() {
-    docker exec aic_eval "$CLEANUP_SCRIPT" 2>/dev/null || true
+    docker exec aic_eval "$CLEANUP_SCRIPT" </dev/null >/dev/null 2>&1 || true
     pkill -9 -f "aic_example_policies|/aic_model/aic_model|ros2 run aic_model|gz sim -g" 2>/dev/null || true
 }
 
@@ -177,16 +179,12 @@ sleep 2
 START="$(date +%s)"
 
 # Terminal 1 — engine + sim.
+# Single-line bash -c with && chain matches the working pattern in
+# run_scoring_loop.sh; multi-line forms get flattened by distrobox's
+# wrapping and exec ends up parsed as another export arg.
 (
-    distrobox enter -r aic_eval -- bash -c "
-        export AIC_RESULTS_DIR='$OUTPUT_DIR'
-        exec /entrypoint.sh \
-            ground_truth:=$GROUND_TRUTH \
-            start_aic_engine:=true \
-            shutdown_on_aic_engine_exit:=true \
-            gazebo_gui:=$GAZEBO_GUI \
-            launch_rviz:=$LAUNCH_RVIZ \
-            aic_engine_config_file:='$CONFIG'"
+    distrobox enter -r aic_eval -- \
+        bash -c "export AIC_RESULTS_DIR='$OUTPUT_DIR' && exec /entrypoint.sh ground_truth:=$GROUND_TRUTH start_aic_engine:=true shutdown_on_aic_engine_exit:=true gazebo_gui:=$GAZEBO_GUI launch_rviz:=$LAUNCH_RVIZ aic_engine_config_file:='$CONFIG'"
 ) > "$T1_LOG" 2>&1 &
 T1_PID=$!
 
@@ -225,7 +223,10 @@ fi
 ) > "$T2_LOG" 2>&1 &
 T2_PID=$!
 
-echo "Recording in progress. Press ESC in the focused terminal to abort."
+echo "Recording in progress. Ctrl-C in this terminal to abort."
+echo "(Once Gazebo + the policy node are up and 'TeleopAssist.insert_cable enter'"
+echo " appears in the policy log, ESC inside the launch terminal will also stop"
+echo " the policy via the keyboard listener.)"
 
 # Wait for run to finish (T1 exit or scoring.yaml + grace).
 POST_DONE_GRACE=15
