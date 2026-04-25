@@ -489,10 +489,28 @@ class CheatCodeMJ(CheatCode):
                     f"Lifting back to hover for retry {attempt}/{self._max_retries}"
                 )
                 send_feedback(f"insertion retry {attempt}/{self._max_retries}: lifting")
+                # Lift from wherever the plug actually is (last_z_offset),
+                # NOT from the descent target. If stuck-detection aborted
+                # early, last_z_offset can still be high up — lifting from
+                # -INSERTION_DEPTH would command the plug to first dash
+                # DOWN to the descent target before ramping back up.
+                # Duration scales proportionally with the distance to cover
+                # so a small lift doesn't take the same time as a full one.
+                lift_distance = approach_z_offset - last_z_offset
+                full_lift_distance = approach_z_offset - (-INSERTION_DEPTH)
+                lift_duration = max(
+                    0.5,  # floor so very small lifts still have a sane min-jerk
+                    descent_time * self._lift_time_frac
+                        * (lift_distance / full_lift_distance),
+                )
+                self.get_logger().info(
+                    f"Lift: from z={last_z_offset:.3f} to z={approach_z_offset:.3f} "
+                    f"({lift_distance * 1000:.0f}mm) over {lift_duration:.2f}s"
+                )
                 lift_traj = _scalar_trajectory(
-                    -INSERTION_DEPTH,
+                    last_z_offset,
                     approach_z_offset,
-                    descent_time * self._lift_time_frac,
+                    lift_duration,
                 )
                 t0 = self.time_now()
                 while True:
