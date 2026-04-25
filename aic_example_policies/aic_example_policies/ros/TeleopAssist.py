@@ -54,6 +54,16 @@ Env vars
                             insertion. Default ``1``.
 - ``INSERTION_SETTLE_SECONDS`` — extra seconds to record after the insertion
                             event before exiting. Default ``1.0``.
+- ``UNPAUSE_BRIDGE_SECONDS`` — when transitioning pause → delta, cap the
+                            position rate-of-change toward the inner
+                            policy's target for this many seconds, so the
+                            arm doesn't teleport from the held pose to wherever
+                            the inner has advanced to. Default ``2.0``. The
+                            inner policy's clock kept running during pause —
+                            without this cap, unpausing during descent would
+                            jump the arm straight to the insertion pose.
+- ``UNPAUSE_MAX_LIN_VEL``  — linear velocity cap during the bridge (m/s).
+                            Default ``0.1``.
 - ``RECORD_DATASET_PATH`` — directory under which to create the LeRobot
                             dataset. If unset, no recording.
 - ``RECORD_TASK_PROMPT``  — natural-language task string written into each
@@ -364,6 +374,14 @@ class TeleopAssist(Policy):
         self._last_motion_update: Optional[MotionUpdate] = None
         self._last_publish_time: float = 0.0
 
+        # Pause → delta bridging. The inner policy's clock keeps running
+        # during pause; without a bridge, unpausing teleports the arm to
+        # wherever the inner has advanced to in its trajectory.
+        self._previous_teleop_mode: str = "delta"
+        self._bridge_start_time: Optional[float] = None
+        self._bridge_seconds = float(os.environ.get("UNPAUSE_BRIDGE_SECONDS", "2.0"))
+        self._bridge_max_lin_vel = float(os.environ.get("UNPAUSE_MAX_LIN_VEL", "0.1"))
+
     def _on_insertion_event(self, msg) -> None:
         """Called when the engine publishes a /scoring/insertion_event."""
         if self._insertion_seen_at is None:
@@ -404,6 +422,18 @@ class TeleopAssist(Policy):
         if state.mode == "stop":
             return motion_update, False, "stop"
 
+        # Detect pause → delta transition: start a bridge so the arm doesn't
+        # teleport from our held pose to wherever the inner's clock has now
+        # advanced to. The inner kept running on real time during pause —
+        # if we just publish its current command, the controller chases a
+        # target that may be the entire descent ahead.
+        if self._previous_teleop_mode == "pause" and state.mode == "delta":
+            self._bridge_start_time = time.monotonic()
+            self.get_logger().info(
+                f"TeleopAssist: pause → delta, bridging position rate for {self._bridge_seconds:.1f}s"
+            )
+        self._previous_teleop_mode = state.mode
+
         # In pause mode, replace inner's commanded pose with our last published
         # pose (teleop becomes the only source of motion).
         if state.mode == "pause" and self._last_motion_update is not None:
@@ -435,6 +465,29 @@ class TeleopAssist(Policy):
             motion_update.pose.orientation = Quaternion(
                 x=float(new_q[0]), y=float(new_q[1]), z=float(new_q[2]), w=float(new_q[3])
             )
+
+        # Pause→delta bridge: cap position step toward inner's target while
+        # the bridge window is active. Position only — orientation usually
+        # doesn't drift dramatically during a pause.
+        if (
+            state.mode == "delta"
+            and self._bridge_start_time is not None
+            and self._last_motion_update is not None
+        ):
+            elapsed = time.monotonic() - self._bridge_start_time
+            if elapsed < self._bridge_seconds:
+                max_step = self._bridge_max_lin_vel * dt
+                prev = self._last_motion_update.pose.position
+                tgt = motion_update.pose.position
+                dx, dy, dz = tgt.x - prev.x, tgt.y - prev.y, tgt.z - prev.z
+                mag = (dx * dx + dy * dy + dz * dz) ** 0.5
+                if mag > max_step:
+                    scale = max_step / mag
+                    motion_update.pose.position.x = prev.x + dx * scale
+                    motion_update.pose.position.y = prev.y + dy * scale
+                    motion_update.pose.position.z = prev.z + dz * scale
+            else:
+                self._bridge_start_time = None  # bridge complete
 
         return motion_update, state.active, state.mode
 
