@@ -135,10 +135,42 @@ class CheatCodeMJ(CheatCode):
         self._max_retries = int(
             parent_node.get_parameter("max_insertion_retries").value
         )
+        # Deliberate-failure injection for retry testing. The XY offset is
+        # added to port_tf before passing it to calc_gripper_pose, so the
+        # descent commands aim at a fake target. The insertion check uses
+        # the REAL port pose, so a non-zero offset reliably fails — useful
+        # for verifying the retry loop fires + the lift trajectory works.
+        if not parent_node.has_parameter("bad_port_offset_x"):
+            parent_node.declare_parameter("bad_port_offset_x", 0.0)
+        if not parent_node.has_parameter("bad_port_offset_y"):
+            parent_node.declare_parameter("bad_port_offset_y", 0.0)
+        self._bad_port_offset_x = float(
+            parent_node.get_parameter("bad_port_offset_x").value
+        )
+        self._bad_port_offset_y = float(
+            parent_node.get_parameter("bad_port_offset_y").value
+        )
         self.get_logger().info(
             f"CheatCodeMJ params: insertion_threshold_m={self._insertion_threshold}, "
             f"max_insertion_retries={self._max_retries}"
         )
+        if self._bad_port_offset_x != 0.0 or self._bad_port_offset_y != 0.0:
+            self.get_logger().warn(
+                f"⚠ BAD port offset injected: dx={self._bad_port_offset_x * 1000:.1f}mm "
+                f"dy={self._bad_port_offset_y * 1000:.1f}mm — descent will aim off-target"
+            )
+
+    def _apply_bad_offset(self, port_tf):
+        """Mutate port_tf to add the configured XY offset (for retry testing).
+
+        Default 0,0 is a no-op. The offset is applied to every refreshed
+        port_tf so all attempts see the same target shift. The insertion
+        check uses the REAL port pose (captured once at initial lookup),
+        so non-zero offsets reliably fail.
+        """
+        if self._bad_port_offset_x != 0.0 or self._bad_port_offset_y != 0.0:
+            port_tf.translation.x += self._bad_port_offset_x
+            port_tf.translation.y += self._bad_port_offset_y
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -282,6 +314,15 @@ class CheatCodeMJ(CheatCode):
             if csvf: csvf.close()
             return False
 
+        # Capture the REAL port pose ONCE before any offset injection — used
+        # by the insertion check so a deliberately-bad offset still fails
+        # honestly even though descent aims at the fake target.
+        real_port_xyz = (
+            port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
+        )
+
+        # Apply bad-offset injection (no-op when both offsets are 0).
+        self._apply_bad_offset(port_tf)
         port_xyz = (
             port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
         )
@@ -374,6 +415,7 @@ class CheatCodeMJ(CheatCode):
             port_tf = self._parent_node._tf_buffer.lookup_transform(
                 "base_link", port_frame, Time()
             ).transform
+            self._apply_bad_offset(port_tf)
             port_xyz = (
                 port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
             )
@@ -448,6 +490,7 @@ class CheatCodeMJ(CheatCode):
                     port_tf = self._parent_node._tf_buffer.lookup_transform(
                         "base_link", port_frame, Time()
                     ).transform
+                    self._apply_bad_offset(port_tf)
                     port_xyz = (
                         port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
                     )
@@ -496,15 +539,17 @@ class CheatCodeMJ(CheatCode):
             )
             self.sleep_for(settle_time)
 
-            # Insertion check via plug-port distance.
+            # Insertion check via plug-port distance — use the REAL port pose
+            # captured before any bad-offset injection, so a deliberately-bad
+            # offset still fails the check honestly.
             try:
                 plug_final = self._lookup("base_link", plug_frame)
                 final_dist = float(
                     np.linalg.norm(
                         np.array([
-                            plug_final.translation.x - port_xyz[0],
-                            plug_final.translation.y - port_xyz[1],
-                            plug_final.translation.z - port_xyz[2],
+                            plug_final.translation.x - real_port_xyz[0],
+                            plug_final.translation.y - real_port_xyz[1],
+                            plug_final.translation.z - real_port_xyz[2],
                         ])
                     )
                 )

@@ -31,6 +31,10 @@
 #                         Default: 0.005.
 #   --max-retries N       Max retry attempts for CheatCodeMJ if the first
 #                         descent doesn't seat. Default: 1.
+#   --bad-port-offset-x M Inject a deliberate XY offset into CheatCodeMJ's
+#                         port_tf so the descent aims off-target. Useful
+#                         for testing the retry loop. Default: 0.
+#   --bad-port-offset-y M  Same for Y. Default: 0.
 #   --gui                 Launch Gazebo GUI client (default OFF — laptop-friendly).
 #   --no-rviz             Skip RViz (default ON — lightweight viz).
 #   --headless            --no-gui + --no-rviz (no viz at all).
@@ -62,6 +66,8 @@ VCODEC="h264"
 USE_VIDEOS=1
 INSERTION_THRESHOLD=""    # empty = use the policy's default
 MAX_RETRIES=""            # empty = use the policy's default
+BAD_PORT_OFFSET_X=""      # empty = no offset (default)
+BAD_PORT_OFFSET_Y=""      # empty = no offset (default)
 GROUND_TRUTH=false
 RUN_TIMEOUT=300
 READY_WAIT=90
@@ -79,6 +85,8 @@ while [[ $# -gt 0 ]]; do
         --no-videos)     USE_VIDEOS=0; shift ;;
         --insertion-threshold) INSERTION_THRESHOLD="$2"; shift 2 ;;
         --max-retries)   MAX_RETRIES="$2"; shift 2 ;;
+        --bad-port-offset-x) BAD_PORT_OFFSET_X="$2"; shift 2 ;;
+        --bad-port-offset-y) BAD_PORT_OFFSET_Y="$2"; shift 2 ;;
         --ground-truth)  GROUND_TRUTH=true; shift ;;
         --timeout)       RUN_TIMEOUT="$2"; shift 2 ;;
         --ready-wait)    READY_WAIT="$2"; shift 2 ;;
@@ -236,6 +244,12 @@ if [[ -n "$INSERTION_THRESHOLD" ]]; then
 fi
 if [[ -n "$MAX_RETRIES" ]]; then
     POLICY_ARGS+=( -p max_insertion_retries:=$MAX_RETRIES )
+fi
+if [[ -n "$BAD_PORT_OFFSET_X" ]]; then
+    POLICY_ARGS+=( -p bad_port_offset_x:=$BAD_PORT_OFFSET_X )
+fi
+if [[ -n "$BAD_PORT_OFFSET_Y" ]]; then
+    POLICY_ARGS+=( -p bad_port_offset_y:=$BAD_PORT_OFFSET_Y )
 fi
 (
     cd "$SRC"
