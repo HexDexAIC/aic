@@ -603,10 +603,18 @@ class CheatCodeMJ(CheatCode):
                             net_progress = (
                                 stuck_distances[0][1] - stuck_distances[-1][1]
                             )
-                            if net_progress < self._stuck_progress_m:
+                            current_dist = stuck_distances[-1][1]
+                            # Don't abort if we're already within insertion
+                            # threshold — the lack of progress is just the
+                            # natural min-jerk settle, not a stuck-on-board.
+                            # (Without this gate, short stuck_window_s values
+                            # false-trigger at the end of a successful descent.)
+                            already_seated = current_dist <= self._insertion_threshold
+                            if (not already_seated
+                                    and net_progress < self._stuck_progress_m):
                                 self.get_logger().warn(
                                     f"⚠ Stuck detected at t={elapsed:.2f}s "
-                                    f"(fraction={fraction:.2f}): "
+                                    f"(fraction={fraction:.2f}, dist={current_dist * 1000:.2f}mm): "
                                     f"net progress over last {self._stuck_window_s:.1f}s = "
                                     f"{net_progress * 1000:+.2f}mm "
                                     f"(threshold={self._stuck_progress_m * 1000:.2f}mm) — "
