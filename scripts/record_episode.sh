@@ -32,14 +32,14 @@
 #   --max-retries N       Max retry attempts for CheatCodeMJ if the first
 #                         descent doesn't seat. Default: 2.
 #   --bad-port-offset-x M Inject a deliberate XY offset into CheatCodeMJ's
-#                         port_tf so the descent aims off-target. Default
-#                         0.002 (2mm) — exercises the retry path on every
-#                         run. Set 0 to disable.
+#                         port_tf so the descent aims off-target. Default 0.
+#                         Used to test the retry path.
 #   --bad-port-offset-y M  Same for Y. Default: 0.
 #   --bad-offset-decay D  Multiplier applied to the bad offset on each
-#                         retry. Default: 0.5 (halve each retry, so later
-#                         attempts can succeed). 1.0 = no decay, 0.0 =
-#                         retries see the real port.
+#                         retry. Default: 1.0 (no decay — all attempts see
+#                         the same offset). Set <1 (e.g. 0.5) to exercise
+#                         "retry recovers" path. Only meaningful when
+#                         --bad-port-offset-{x,y} is non-zero.
 #   --stuck-min-fraction F Don't run stuck-detection until past this
 #                         fraction of the descent. Default: 0.2. Required
 #                         to avoid false-triggering on the natural min-jerk
@@ -84,9 +84,9 @@ VCODEC="h264"
 USE_VIDEOS=1
 INSERTION_THRESHOLD=""    # empty = use the policy's default
 MAX_RETRIES=""            # empty = use the policy's default
-BAD_PORT_OFFSET_X=""      # empty = use the policy's default (0.002 = 2mm)
+BAD_PORT_OFFSET_X=""      # empty = use the policy's default (0)
 BAD_PORT_OFFSET_Y=""      # empty = use the policy's default (0)
-BAD_OFFSET_DECAY=""       # empty = use the policy's default (0.5)
+BAD_OFFSET_DECAY=""       # empty = use the policy's default (1.0)
 STUCK_MIN_FRACTION=""     # empty = use the policy's default (0.2)
 STUCK_WINDOW_S=""         # empty = use the policy's default (1.0)
 STUCK_PROGRESS_M=""       # empty = use the policy's default (0.002)

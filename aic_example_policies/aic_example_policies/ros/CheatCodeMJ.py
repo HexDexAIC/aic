@@ -92,15 +92,13 @@ DEFAULT_MAX_INSERTION_RETRIES = 2  # 1 initial + 2 retries = 3 attempts
 DEFAULT_LIFT_TIME_FRAC = 0.5  # lift back to hover takes this fraction of descent_time
 DEFAULT_HOVER_HOLD_BETWEEN_ATTEMPTS_S = 0.5  # brief steady-state at hover before retry descent
 
-# Bad-offset injection defaults. Non-zero by default so the retry path is
-# exercised on every run — useful while we iterate on the algorithm.
-# Override with -p bad_port_offset_x:=0.0 (or `--bad-port-offset-x 0`) to
-# disable. Decay <1 lets later retries see a smaller offset → exercises
-# the "retry recovers" path; 1.0 means all attempts see the full offset
-# (all-fail testing).
-DEFAULT_BAD_PORT_OFFSET_X = 0.002
+# Bad-offset injection defaults. Off by default — these are debugging
+# knobs for exercising the retry path with a deliberately failing first
+# attempt. Override with --bad-port-offset-x N (or -p bad_port_offset_x:=N)
+# at launch when you want to test stuck-detect + retry behavior.
+DEFAULT_BAD_PORT_OFFSET_X = 0.0
 DEFAULT_BAD_PORT_OFFSET_Y = 0.0
-DEFAULT_BAD_OFFSET_DECAY_PER_RETRY = 0.5
+DEFAULT_BAD_OFFSET_DECAY_PER_RETRY = 1.0
 
 # Early-abort during descent. Sample plug-port distance every control tick;
 # once we're past stuck_min_fraction of the descent, look at the recent
