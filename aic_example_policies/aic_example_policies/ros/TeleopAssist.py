@@ -44,6 +44,15 @@ Env vars
 - ``TELEOP_HOLD_SECONDS`` — when ``INNER_POLICY=none``, how long the
                             self-loop runs before exiting. Default 300.
                             Press ESC to exit early.
+- ``RECORD_VCODEC``       — video codec for LeRobot dataset (when
+                            videos are stored). Default ``h264`` —
+                            much faster than the LeRobot default
+                            ``libsvtav1`` on consumer laptops, at the
+                            cost of larger files. Set to ``libsvtav1``
+                            for the smaller archived files.
+- ``RECORD_USE_VIDEOS``   — ``1``/``0``. ``0`` stores PNGs per frame
+                            instead of MP4s. Avoids encoding entirely
+                            (fast finalize, big disk). Default ``1``.
 """
 
 from __future__ import annotations
@@ -198,6 +207,9 @@ class _DatasetWriter:
     def __init__(self, root: Path, repo_id: str, fps: int, image_shape: tuple):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+        vcodec = os.environ.get("RECORD_VCODEC", "h264")
+        use_videos = os.environ.get("RECORD_USE_VIDEOS", "1") == "1"
+
         h, w, _c = image_shape
         features = {
             "observation.images.left": {
@@ -250,7 +262,8 @@ class _DatasetWriter:
             fps=fps,
             features=features,
             root=str(root),
-            use_videos=True,
+            use_videos=use_videos,
+            vcodec=vcodec,
         )
         self._frames_in_episode = 0
 
@@ -591,8 +604,17 @@ class TeleopAssist(Policy):
         finally:
             # Save the episode whether or not the inner returned True.
             if self._writer is not None:
+                n_to_save = self._writer._frames_in_episode
+                log.info(
+                    f"TeleopAssist: encoding/saving {n_to_save} frames to dataset "
+                    f"(this can take 20–60 s for video; PNG mode is faster)..."
+                )
+                t0 = time.time()
                 n_frames = self._writer.save_episode()
-                log.info(f"TeleopAssist: saved {n_frames} frames to dataset")
+                log.info(
+                    f"TeleopAssist: saved {n_frames} frames to dataset "
+                    f"in {time.time() - t0:.1f} s"
+                )
             if self.teleop is not None:
                 self.teleop.stop()
                 self.teleop = None
