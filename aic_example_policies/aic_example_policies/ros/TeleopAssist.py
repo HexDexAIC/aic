@@ -10,9 +10,17 @@
 
 """TeleopAssist — shared-autonomy policy wrapper with optional dataset recording.
 
-Wraps any other policy class (configurable via the ``INNER_POLICY`` env var) and
+Wraps an inner policy class (configurable via the ``INNER_POLICY`` env var) and
 optionally injects keyboard-driven cartesian deltas on top of the inner
-policy's commands. Modes:
+policy's commands. Designed for the engine-driven case: the AIC engine
+spawns a deterministic scene and triggers the ``insert_cable`` action, the
+inner policy attempts the insertion, and the human can correct on top.
+
+For *pure-teleop* data collection (no inner policy, no engine), use the
+shipped ``lerobot-record`` flow with the ``aic_controller`` Robot driver —
+see ``src/aic/aic_utils/lerobot_robot_aic/README.md``.
+
+Modes (toggled with SPACE / TAB / ESC):
 
 - "delta"   — inner policy's MotionUpdate goes out, teleop adds a small delta
               when keys are held. Default.
@@ -27,23 +35,31 @@ schema follows the design rationale in
 the absolute commanded pose, leaving delta/6D-rotation/compliance derivation
 to a downstream training transform.
 
+The episode auto-ends on a ``/scoring/insertion_event`` from the engine,
+after a configurable settling window so the steady-state frames are
+captured. ESC also ends the episode at any time.
+
 Env vars
 --------
-- ``INNER_POLICY``        — short class name from ``aic_example_policies.ros``,
-                            e.g. ``CheatCodeMJ``, ``WaveArm``, or ``none`` for
-                            pure-teleop hold mode. Default: ``WaveArm``.
+- ``INNER_POLICY``        — short class name from ``aic_example_policies.ros``
+                            (e.g. ``CheatCodeMJ``, ``WaveArm``). Default
+                            ``WaveArm``. (Pure-teleop ``none`` mode removed —
+                            use ``lerobot-record`` instead.)
 - ``ENABLE_TELEOP``       — ``1``/``0``. If ``0``, runs the inner policy alone
                             (still records if ``RECORD_DATASET_PATH`` set).
                             Default: ``1``.
+- ``AUTO_END_ON_INSERTION`` — ``1``/``0``. If ``1``, subscribe to
+                            ``/scoring/insertion_event`` and end the episode
+                            after a settling window once the engine reports
+                            insertion. Default ``1``.
+- ``INSERTION_SETTLE_SECONDS`` — extra seconds to record after the insertion
+                            event before exiting. Default ``1.0``.
 - ``RECORD_DATASET_PATH`` — directory under which to create the LeRobot
                             dataset. If unset, no recording.
 - ``RECORD_TASK_PROMPT``  — natural-language task string written into each
                             frame. Default: derived from the InsertCable task.
 - ``TELEOP_LIN_RATE``     — keyboard linear rate (m/s). Default 0.04.
 - ``TELEOP_ANG_RATE``     — keyboard angular rate (rad/s). Default 0.5.
-- ``TELEOP_HOLD_SECONDS`` — when ``INNER_POLICY=none``, how long the
-                            self-loop runs before exiting. Default 300.
-                            Press ESC to exit early.
 - ``RECORD_VCODEC``       — video codec for LeRobot dataset (when
                             videos are stored). Default ``h264`` —
                             much faster than the LeRobot default
@@ -290,24 +306,28 @@ class TeleopAssist(Policy):
         super().__init__(parent_node)
         log = self.get_logger()
 
-        # Load inner policy.
+        # Load inner policy. INNER_POLICY=none was removed — pure teleop
+        # belongs in the lerobot-record flow (lerobot_robot_aic).
         inner_name = os.environ.get("INNER_POLICY", "WaveArm")
-        self._inner_policy_name = inner_name
         if inner_name == "none":
-            self.inner = None
-            log.info("TeleopAssist: no inner policy (pure-teleop / hold-pose mode)")
-        else:
-            module_path = f"aic_example_policies.ros.{inner_name}"
-            try:
-                module = importlib.import_module(module_path)
-            except Exception as e:
-                log.fatal(f"TeleopAssist: cannot import inner policy {module_path!r}: {e}")
-                raise
-            inner_cls = getattr(module, inner_name, None)
-            if inner_cls is None:
-                raise LookupError(f"Class {inner_name} not in module {module_path}")
-            log.info(f"TeleopAssist: instantiating inner policy {inner_name}")
-            self.inner = inner_cls(parent_node)
+            log.fatal(
+                "INNER_POLICY=none is no longer supported. For pure teleop, "
+                "use `pixi run lerobot-record` with the aic_controller robot "
+                "driver — see src/aic/aic_utils/lerobot_robot_aic/README.md."
+            )
+            raise ValueError("INNER_POLICY=none is not supported")
+        self._inner_policy_name = inner_name
+        module_path = f"aic_example_policies.ros.{inner_name}"
+        try:
+            module = importlib.import_module(module_path)
+        except Exception as e:
+            log.fatal(f"TeleopAssist: cannot import inner policy {module_path!r}: {e}")
+            raise
+        inner_cls = getattr(module, inner_name, None)
+        if inner_cls is None:
+            raise LookupError(f"Class {inner_name} not in module {module_path}")
+        log.info(f"TeleopAssist: instantiating inner policy {inner_name}")
+        self.inner = inner_cls(parent_node)
 
         # Optional teleop.
         self._teleop_enabled = os.environ.get("ENABLE_TELEOP", "1") == "1"
@@ -325,9 +345,33 @@ class TeleopAssist(Policy):
         self._writer: Optional[_DatasetWriter] = None
         self._task_prompt = os.environ.get("RECORD_TASK_PROMPT", "")
 
+        # Auto-end-on-insertion config + state.
+        self._auto_end_on_insertion = os.environ.get("AUTO_END_ON_INSERTION", "1") == "1"
+        self._settle_seconds = float(os.environ.get("INSERTION_SETTLE_SECONDS", "1.0"))
+        self._insertion_seen_at: Optional[float] = None  # wall-clock seconds when /scoring/insertion_event arrived
+        self._insertion_event_sub = None
+        if self._auto_end_on_insertion:
+            from std_msgs.msg import String
+            self._insertion_event_sub = parent_node.create_subscription(
+                String, "/scoring/insertion_event", self._on_insertion_event, 10
+            )
+            log.info(
+                f"TeleopAssist: auto-end on /scoring/insertion_event "
+                f"(+ {self._settle_seconds:.1f}s settle window)"
+            )
+
         # Bookkeeping for pause-mode hold-pose.
         self._last_motion_update: Optional[MotionUpdate] = None
         self._last_publish_time: float = 0.0
+
+    def _on_insertion_event(self, msg) -> None:
+        """Called when the engine publishes a /scoring/insertion_event."""
+        if self._insertion_seen_at is None:
+            self._insertion_seen_at = time.monotonic()
+            self.get_logger().info(
+                f"TeleopAssist: insertion event seen ('{msg.data}') — "
+                f"recording {self._settle_seconds:.1f}s of settle, then exiting"
+            )
 
     # ── Inner-policy callback wrapper ─────────────────────────────────
     def _maybe_init_writer(self, obs: Observation) -> None:
@@ -427,78 +471,6 @@ class TeleopAssist(Policy):
         except Exception as e:  # pragma: no cover
             self.get_logger().error(f"TeleopAssist: record failure: {e}")
 
-    # ── Pure-teleop self-loop (when INNER_POLICY=none) ────────────────
-    def _self_loop(
-        self,
-        task: Task,
-        get_observation: GetObservationCallback,
-        wrapped_move_robot: MoveRobotCallback,
-        send_feedback: SendFeedbackCallback,
-    ) -> bool:
-        """Hold the current TCP pose; teleop drives. Duration via TELEOP_HOLD_SECONDS env (default 300)."""
-        log = self.get_logger()
-        hold_seconds = float(os.environ.get("TELEOP_HOLD_SECONDS", "300"))
-
-        # Wait for first observation.
-        deadline = time.time() + 5.0
-        obs = get_observation()
-        while obs is None and time.time() < deadline:
-            time.sleep(0.05)
-            obs = get_observation()
-        if obs is None:
-            log.error("TeleopAssist self_loop: no observation in 5 s — aborting")
-            return False
-
-        # Seed last_motion_update with the current TCP pose from controller_state.
-        cs = obs.controller_state
-        seed = self.set_pose_target_via_motion_update(
-            position=(cs.tcp_pose.position.x, cs.tcp_pose.position.y, cs.tcp_pose.position.z),
-            orientation=(
-                cs.tcp_pose.orientation.x,
-                cs.tcp_pose.orientation.y,
-                cs.tcp_pose.orientation.z,
-                cs.tcp_pose.orientation.w,
-            ),
-        )
-        # Publish once to establish hold pose.
-        wrapped_move_robot(motion_update=seed)
-
-        log.info(
-            "============================================================\n"
-            "  TELEOP READY — focus the launch terminal and press keys\n"
-            "    W/S A/D R/F  → linear xyz       (~40 mm/s)\n"
-            "    Q/E I/K J/L  → yaw / pitch / roll (~28 deg/s)\n"
-            "    SPACE        → toggle pause mode\n"
-            "    ESC          → stop and exit\n"
-            f"  Holding pose for up to {hold_seconds:.0f} s\n"
-            "============================================================"
-        )
-
-        loop_dt = 0.05  # 20 Hz
-        end_time = time.time() + hold_seconds
-        while time.time() < end_time:
-            time.sleep(loop_dt)
-            mu = self.set_pose_target_via_motion_update(
-                position=(
-                    self._last_motion_update.pose.position.x,
-                    self._last_motion_update.pose.position.y,
-                    self._last_motion_update.pose.position.z,
-                ),
-                orientation=(
-                    self._last_motion_update.pose.orientation.x,
-                    self._last_motion_update.pose.orientation.y,
-                    self._last_motion_update.pose.orientation.z,
-                    self._last_motion_update.pose.orientation.w,
-                ),
-            )
-            wrapped_move_robot(motion_update=mu)
-            if self.teleop is not None and self.teleop.get_mode() == "stop":
-                log.info("TeleopAssist self_loop: ESC → exiting")
-                break
-
-        send_feedback("teleop self-loop done")
-        return True
-
     def set_pose_target_via_motion_update(
         self, position: tuple, orientation: tuple
     ) -> MotionUpdate:
@@ -544,14 +516,27 @@ class TeleopAssist(Policy):
         log.info(
             f"TeleopAssist.insert_cable enter (inner={self._inner_policy_name}, "
             f"teleop={'on' if self.teleop else 'off'}, "
-            f"record={'on' if self._dataset_root else 'off'})"
+            f"record={'on' if self._dataset_root else 'off'}, "
+            f"auto_end={'on' if self._auto_end_on_insertion else 'off'})"
         )
         if not self._task_prompt:
             self._task_prompt = f"insert {task.plug_type} cable into {task.port_type} port"
+        if self.teleop is not None:
+            log.info(
+                "============================================================\n"
+                "  TELEOP ACTIVE — focus the launch terminal and press keys\n"
+                "    W/S A/D R/F  → linear xyz       (~40 mm/s)\n"
+                "    Q/E I/K J/L  → yaw / pitch / roll (~28 deg/s)\n"
+                "    SPACE        → toggle pause (inner policy frozen, you drive)\n"
+                "    TAB          → resume delta mode (inner + your nudges)\n"
+                "    ESC          → stop and exit\n"
+                "============================================================"
+            )
 
         # Reset bookkeeping per episode.
         self._last_motion_update = None
         self._last_publish_time = time.monotonic()
+        self._insertion_seen_at = None
 
         def wrapped_move_robot(
             motion_update: MotionUpdate = None,
@@ -577,6 +562,16 @@ class TeleopAssist(Policy):
                     move_robot(motion_update=self._last_motion_update)
                 return False
 
+            # Auto-end on insertion event after the settling window.
+            if (
+                self._insertion_seen_at is not None
+                and now - self._insertion_seen_at >= self._settle_seconds
+            ):
+                log.info("TeleopAssist: insertion settle elapsed → exiting")
+                if self._last_motion_update is not None:
+                    move_robot(motion_update=self._last_motion_update)
+                return False
+
             self._last_motion_update = mu
 
             # Record only if writer is initialized; first observation lazy-inits.
@@ -587,17 +582,14 @@ class TeleopAssist(Policy):
 
             return move_robot(motion_update=mu)
 
-        # Run inner policy or self-loop.
+        # Run inner policy.
         try:
-            if self.inner is None:
-                ok = self._self_loop(task, get_observation, wrapped_move_robot, send_feedback)
-            else:
-                ok = self.inner.insert_cable(
-                    task=task,
-                    get_observation=get_observation,
-                    move_robot=wrapped_move_robot,
-                    send_feedback=send_feedback,
-                )
+            ok = self.inner.insert_cable(
+                task=task,
+                get_observation=get_observation,
+                move_robot=wrapped_move_robot,
+                send_feedback=send_feedback,
+            )
         except Exception as e:
             log.error(f"TeleopAssist: inner policy raised: {e}")
             ok = False

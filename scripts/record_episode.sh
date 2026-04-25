@@ -12,8 +12,10 @@
 #
 # Options:
 #   --inner POLICY        Inner policy class name (e.g. CheatCodeMJ, WaveArm,
-#                         RunACT) or "none" for pure-teleop hold mode.
-#                         Default: WaveArm.
+#                         RunACT). Default: WaveArm. Pure-teleop (no inner)
+#                         is no longer supported here — use
+#                         `pixi run lerobot-record` per
+#                         src/aic/aic_utils/lerobot_robot_aic/README.md.
 #   --no-teleop           Disable keyboard teleop (run inner policy unchanged,
 #                         still record). Default: teleop on.
 #   --no-record           Disable dataset recording (just run the policy).
