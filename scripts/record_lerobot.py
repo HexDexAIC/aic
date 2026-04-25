@@ -8,7 +8,7 @@
 """Standalone LeRobotDataset recorder for AIC eval runs.
 
 Subscribes to:
-    /aic_model/observations              (obs message)
+    /observations                        (obs message — published by aic_adapter)
     /aic_controller/pose_commands        (action — what the policy commanded)
     /insert_cable/_action/status         (trial bookends)
 
@@ -243,7 +243,7 @@ class AICAsyncRecorder(Node):
         self.done = False  # set on terminal status when not multi-episode
 
         self.create_subscription(
-            Observation, "/aic_model/observations", self._on_obs, 10
+            Observation, "/observations", self._on_obs, 10
         )
         self.create_subscription(
             MotionUpdate, "/aic_controller/pose_commands", self._on_action, 10
