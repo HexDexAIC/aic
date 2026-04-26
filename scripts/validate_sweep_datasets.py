@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deep-validate every dataset produced by spawn_sweep_sfp.py.
 
-For each <sweep_dir>/datasets/seed_NN/aic_recording_*:
+For each <sweep_dir>/seeds/seed_NN/dataset/:
   - parse meta/info.json (schema check)
   - read first-chunk parquet (column existence, frame count agreement)
   - check 6-D rotation columns are unit-norm at the first frame
@@ -24,12 +24,12 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 
-def find_dataset(seed_dataset_dir: Path) -> Path | None:
-    if not seed_dataset_dir.exists():
-        return None
-    cands = sorted(p for p in seed_dataset_dir.iterdir()
-                   if p.is_dir() and p.name.startswith("aic_recording_"))
-    return cands[-1] if cands else None
+def find_dataset(seed_dir: Path) -> Path | None:
+    """Return <seed_dir>/dataset/ if it has a valid info.json."""
+    ds = seed_dir / "dataset"
+    if ds.is_dir() and (ds / "meta" / "info.json").exists():
+        return ds
+    return None
 
 
 def first_parquet(ds: Path) -> Path | None:
@@ -137,7 +137,7 @@ def main() -> int:
         return 2
     sweep_dir = Path(sys.argv[1])
 
-    seeds = sorted((sweep_dir / "datasets").glob("seed_*"))
+    seeds = sorted((sweep_dir / "seeds").glob("seed_*"))
     results = []
     ok_count = 0
     for seed_dir in seeds:

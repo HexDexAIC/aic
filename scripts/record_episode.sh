@@ -21,11 +21,15 @@
 #                         Default: CheatCodeMJ. CheatCode-family auto-enables
 #                         --ground-truth.
 #   --no-record           Skip the LeRobot recorder; just run the policy.
+#   --output-dir DIR      Override the auto-stamped run dir. Default:
+#                         aic_results/recording_<TS>_<PORT>/. Used by
+#                         spawn_sweep_sfp.py to land each seed under
+#                         <sweep_dir>/seeds/seed_NN/.
 #   --dataset-root DIR    Where to write the dataset. By default the dataset
 #                         lands under the run dir as <run>/dataset/ (single
 #                         tree per trial). Passing this overrides that and
 #                         restores the legacy <root>/aic_recording_<TS>/
-#                         layout (used by spawn_sweep_sfp.py).
+#                         layout.
 #   --task PROMPT         Task prompt string written into each frame.
 #                         Default: derived from PORT.
 #   --vcodec CODEC        Video codec for the dataset (default: h264).
@@ -84,6 +88,7 @@ fi
 shift
 
 CONFIG_OVERRIDE=""
+OUTPUT_DIR_OVERRIDE=""
 POLICY="CheatCodeMJ"
 ENABLE_RECORD=1
 DATASET_ROOT=""
@@ -111,6 +116,7 @@ LAUNCH_RVIZ=true
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)        CONFIG_OVERRIDE="$2"; shift 2 ;;
+        --output-dir)    OUTPUT_DIR_OVERRIDE="$2"; shift 2 ;;
         --policy)        POLICY="$2"; shift 2 ;;
         --no-record)     ENABLE_RECORD=0; shift ;;
         --dataset-root)  DATASET_ROOT="$2"; DATASET_ROOT_USER_SET=1; shift 2 ;;
@@ -155,7 +161,11 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 1
 fi
 
-OUTPUT_DIR="$WS/aic_results/recording_${TS}_${PORT}"
+if [[ -n "$OUTPUT_DIR_OVERRIDE" ]]; then
+    OUTPUT_DIR="$OUTPUT_DIR_OVERRIDE"
+else
+    OUTPUT_DIR="$WS/aic_results/recording_${TS}_${PORT}"
+fi
 mkdir -p "$OUTPUT_DIR"
 
 # Single-tree layout by default: dataset goes under the run dir as "dataset/".

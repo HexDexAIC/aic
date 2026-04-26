@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Retry seeds whose policy log is missing or empty.
 
-Walks <sweep_dir>/runs/seed_NN/, classifies each as ok / failed based on
+Walks <sweep_dir>/seeds/seed_NN/, classifies each as ok / failed based on
 whether the policy log has a 'CheatCodeMJ done.' line, and re-runs the
-failed seeds via record_episode.sh. Updates summary.json in place.
+failed seeds via record_episode.sh --output-dir <seed_dir>. Wipes the
+seed's previous tree before retrying so old artifacts don't leak through.
+Updates summary.json in place.
 
 Usage:
   AIC_USE_DOCKER_EXEC=1 \
@@ -35,22 +37,33 @@ def policy_succeeded(output_dir: str) -> bool:
     return False
 
 
-def find_dataset(seed_dataset_dir: Path) -> Path | None:
-    if not seed_dataset_dir.exists():
-        return None
-    cands = sorted(p for p in seed_dataset_dir.iterdir()
-                   if p.is_dir() and p.name.startswith("aic_recording_"))
-    return cands[-1] if cands else None
+def find_dataset(seed_dir: Path) -> Path | None:
+    """Return <seed_dir>/dataset/ if present."""
+    ds = seed_dir / "dataset"
+    return ds if ds.is_dir() else None
 
 
-def run_one(record_script: Path, cfg_path: Path, ds_root: Path,
-            log_dir: Path, timeout_s: int) -> dict:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    driver_log = log_dir / "driver.log"
+def run_one(record_script: Path, cfg_path: Path, seed_dir: Path,
+            timeout_s: int) -> dict:
+    """Re-run one seed, single-tree layout under seed_dir."""
+    import shutil
+    if seed_dir.exists():
+        # Wipe the previous attempt; bag/dataset/etc. would otherwise
+        # collide. Keep the parent dirs.
+        for child in seed_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                try:
+                    child.unlink()
+                except Exception:
+                    pass
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    driver_log = seed_dir / "driver.log"
     cmd = [
         str(record_script), "sfp",
         "--config", str(cfg_path),
-        "--dataset-root", str(ds_root),
+        "--output-dir", str(seed_dir),
         "--timeout", str(timeout_s),
     ]
     start = time.time()
@@ -58,14 +71,8 @@ def run_one(record_script: Path, cfg_path: Path, ds_root: Path,
         proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
                               cwd=str(record_script.parents[2]), check=False)
     elapsed = time.time() - start
-    output_dir = ""
-    for line in driver_log.read_text(errors="ignore").splitlines():
-        if line.strip().startswith("output:"):
-            output_dir = line.split(":", 1)[1].strip()
-            break
-    (log_dir / "output_dir.txt").write_text(output_dir + "\n")
     return {"exit_code": proc.returncode, "elapsed_s": round(elapsed, 1),
-            "output_dir": output_dir}
+            "output_dir": str(seed_dir)}
 
 
 def main() -> int:
@@ -91,15 +98,14 @@ def main() -> int:
 
     for seed in failed_seeds:
         cfg_path = sweep / "configs" / f"seed_{seed:02d}.yaml"
-        ds_root = sweep / "datasets" / f"seed_{seed:02d}"
-        log_dir = sweep / "runs" / f"seed_{seed:02d}"
+        seed_dir = sweep / "seeds" / f"seed_{seed:02d}"
         if not cfg_path.exists():
             print(f"seed {seed:02d}: skipping — no config")
             continue
 
         for attempt in range(1, args.max_retries + 1):
             print(f"seed {seed:02d}: retry attempt {attempt}", flush=True)
-            run_info = run_one(record_script, cfg_path, ds_root, log_dir,
+            run_info = run_one(record_script, cfg_path, seed_dir,
                                args.timeout_s)
             if policy_succeeded(run_info["output_dir"]):
                 # Update summary.json in place.
@@ -132,7 +138,7 @@ def main() -> int:
                                 break
                         r["run"] = {**r.get("run", {}), **run_info,
                                      "retry_attempt": attempt}
-                        ds = find_dataset(ds_root)
+                        ds = find_dataset(seed_dir)
                         if ds:
                             r["dataset"]["path"] = str(ds)
                 summary_path.write_text(json.dumps(summary, indent=2) + "\n")

@@ -22,9 +22,9 @@ else
     SEED=$(printf "%02d" "$2")
     SAVE=0
     [[ "${3:-}" == "--save" ]] && SAVE=1
-    DS=$(ls -td "$SWEEP/datasets/seed_$SEED/aic_recording_"* 2>/dev/null | head -1)
-    if [[ -z "$DS" ]]; then
-        echo "ERROR: no aic_recording_* under $SWEEP/datasets/seed_$SEED/" >&2
+    DS="$SWEEP/seeds/seed_$SEED/dataset"
+    if [[ ! -d "$DS" ]]; then
+        echo "ERROR: no dataset/ under $SWEEP/seeds/seed_$SEED/" >&2
         exit 1
     fi
 fi

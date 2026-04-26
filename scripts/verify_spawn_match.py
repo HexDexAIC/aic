@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Post-process a spawn-sweep dir: compare each spawned scene to its YAML.
 
-For each seed in <sweep_dir>/runs/seed_NN/, opens the bag at the path
-recorded in output_dir.txt, reads /tf_static for the aic_world → task_board
-transform, and compares against the YAML at <sweep_dir>/configs/seed_NN.yaml.
+For each seed in <sweep_dir>/seeds/seed_NN/, opens the bag at
+seeds/seed_NN/bag_trial_1*/, reads /scoring/tf and /tf_static for the
+aic_world → task_board transform, and compares against the YAML at
+<sweep_dir>/configs/seed_NN.yaml.
 
 Writes <sweep_dir>/spawn_verification.json with per-seed deltas.
 
@@ -91,15 +92,15 @@ def angle_delta(actual: float, expected: float) -> float:
 
 
 def verify_seed(seed_dir: Path, config_path: Path) -> dict:
-    """Compare spawned scene to YAML for one seed."""
-    out_dir_file = seed_dir / "output_dir.txt"
-    if not out_dir_file.exists():
-        return {"checked": False, "reason": "no output_dir.txt"}
-    output_dir = Path(out_dir_file.read_text().strip())
-    if not output_dir.exists():
-        return {"checked": False, "reason": f"output_dir gone: {output_dir}"}
+    """Compare spawned scene to YAML for one seed.
 
-    bag_candidates = list(output_dir.glob("bag_trial_1*"))
+    seed_dir is the per-seed run dir (single-tree layout) containing the
+    bag_trial_1*/, terminal logs, scoring.yaml, and dataset/.
+    """
+    if not seed_dir.exists():
+        return {"checked": False, "reason": f"seed_dir gone: {seed_dir}"}
+
+    bag_candidates = list(seed_dir.glob("bag_trial_1*"))
     if not bag_candidates:
         return {"checked": False, "reason": "no bag_trial_1*"}
     bag_dir = bag_candidates[0]
@@ -196,7 +197,7 @@ def main() -> int:
         print(f"missing: {sweep_dir}", file=sys.stderr)
         return 1
 
-    runs = sorted((sweep_dir / "runs").glob("seed_*"))
+    runs = sorted((sweep_dir / "seeds").glob("seed_*"))
     results = []
     matched_count = 0
     checked_count = 0

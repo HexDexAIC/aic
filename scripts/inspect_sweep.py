@@ -22,12 +22,10 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 
-def find_dataset(seed_dataset_dir: Path) -> Path | None:
-    if not seed_dataset_dir.exists():
-        return None
-    cands = sorted(p for p in seed_dataset_dir.iterdir()
-                   if p.is_dir() and p.name.startswith("aic_recording_"))
-    return cands[-1] if cands else None
+def find_dataset(seed_dir: Path) -> Path | None:
+    """Return <seed_dir>/dataset/ if it exists."""
+    ds = seed_dir / "dataset"
+    return ds if ds.is_dir() else None
 
 
 def episode_stats(ds: Path) -> dict:
@@ -92,8 +90,8 @@ def main() -> int:
         sp = by_seed_spawn.get(seed, {})
         vl = by_seed_val.get(seed, {})
 
-        ds_path = sweep / "datasets" / f"seed_{seed:02d}"
-        ds_dir = find_dataset(ds_path)
+        seed_dir = sweep / "seeds" / f"seed_{seed:02d}"
+        ds_dir = find_dataset(seed_dir)
         stats = episode_stats(ds_dir) if ds_dir else {}
 
         rows.append({

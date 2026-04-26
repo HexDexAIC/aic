@@ -8,8 +8,13 @@ validates each recorded LeRobot dataset and aggregates insertion success.
 
 All artefacts go under <results>/spawn_sweep_<TS>/:
   configs/seed_NN.yaml
-  runs/seed_NN/{driver.log, output_dir.txt}
-  datasets/seed_NN/aic_recording_<TS>/
+  seeds/seed_NN/                        # single tree per seed
+    driver.log                          # spawn_sweep_sfp.py's tee of record_episode.sh
+    terminal{1,2,3}_*.log               # engine / policy / recorder logs
+    scoring.yaml                        # engine score output
+    bag_trial_1_<TS>/                   # mcap bag (TF, joint_states, ...)
+    cheatcode_mj/                       # policy trajectory CSVs
+    dataset/                            # LeRobotDataset (data/, videos/, meta/)
   samples.json
   summary.json
 
@@ -151,18 +156,21 @@ def run_one_episode(
     *,
     record_script: Path,
     config_path: Path,
-    dataset_root: Path,
-    log_dir: Path,
+    seed_dir: Path,
     timeout_s: int,
 ) -> dict:
-    """Run one episode. Returns a dict with timing + paths + exit info."""
-    log_dir.mkdir(parents=True, exist_ok=True)
-    driver_log = log_dir / "driver.log"
+    """Run one episode into seed_dir (the single-tree per-seed dir).
+
+    record_episode.sh's --output-dir lands all logs/bag/cheatcode_mj
+    output there; the dataset goes to <seed_dir>/dataset/.
+    """
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    driver_log = seed_dir / "driver.log"
 
     cmd = [
         str(record_script), "sfp",
         "--config", str(config_path),
-        "--dataset-root", str(dataset_root),
+        "--output-dir", str(seed_dir),
         "--timeout", str(timeout_s),
     ]
 
@@ -177,23 +185,10 @@ def run_one_episode(
         )
     elapsed = time.time() - start
 
-    # Extract record_episode.sh's OUTPUT_DIR (stamps logs/scoring) from driver
-    # log. The shell prints "output:        <OUTPUT_DIR>".
-    output_dir = ""
-    try:
-        for line in driver_log.read_text(errors="ignore").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("output:"):
-                output_dir = stripped.split(":", 1)[1].strip()
-                break
-    except Exception:
-        pass
-    (log_dir / "output_dir.txt").write_text(output_dir + "\n")
-
     return {
         "exit_code": proc.returncode,
         "elapsed_s": round(elapsed, 1),
-        "output_dir": output_dir,
+        "output_dir": str(seed_dir),
         "driver_log": str(driver_log),
     }
 
@@ -234,13 +229,12 @@ def parse_policy_log(output_dir: str) -> dict:
     }
 
 
-def find_dataset(dataset_root: Path) -> Path | None:
-    """Return the single aic_recording_* dir under dataset_root, if any."""
-    if not dataset_root.exists():
-        return None
-    candidates = sorted(p for p in dataset_root.iterdir()
-                        if p.is_dir() and p.name.startswith("aic_recording_"))
-    return candidates[-1] if candidates else None
+def find_dataset(seed_dir: Path) -> Path | None:
+    """Return <seed_dir>/dataset/ if it exists and has data."""
+    ds = seed_dir / "dataset"
+    if ds.is_dir() and (ds / "meta" / "info.json").exists():
+        return ds
+    return None
 
 
 def validate_dataset(ds_dir: Path) -> dict:
@@ -346,8 +340,7 @@ def main() -> int:
         sweep_dir = ws / "aic_results" / f"spawn_sweep_{ts}"
     sweep_dir.mkdir(parents=True, exist_ok=True)
     (sweep_dir / "configs").mkdir(exist_ok=True)
-    (sweep_dir / "runs").mkdir(exist_ok=True)
-    (sweep_dir / "datasets").mkdir(exist_ok=True)
+    (sweep_dir / "seeds").mkdir(exist_ok=True)
 
     print(f"sweep dir: {sweep_dir}", flush=True)
 
@@ -368,8 +361,7 @@ def main() -> int:
         cfg_path = sweep_dir / "configs" / f"seed_{seed:02d}.yaml"
         cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
-        ds_root = sweep_dir / "datasets" / f"seed_{seed:02d}"
-        log_dir = sweep_dir / "runs" / f"seed_{seed:02d}"
+        seed_dir = sweep_dir / "seeds" / f"seed_{seed:02d}"
 
         print(f"[seed {seed:02d}] rail={spec['nic_rail']} "
               f"board=({spec['board_x']:+.4f},{spec['board_y']:+.4f},"
@@ -381,15 +373,14 @@ def main() -> int:
         run_info = run_one_episode(
             record_script=record_script,
             config_path=cfg_path,
-            dataset_root=ds_root,
-            log_dir=log_dir,
+            seed_dir=seed_dir,
             timeout_s=args.timeout_s,
         )
         print(f"  → exit={run_info['exit_code']} "
               f"elapsed={run_info['elapsed_s']}s", flush=True)
 
         # Per-episode summary: dataset, policy log, spawn match.
-        ds_dir = find_dataset(ds_root)
+        ds_dir = find_dataset(seed_dir)
         ds_check = validate_dataset(ds_dir) if ds_dir else {"ok": False, "reason": "no dataset"}
         policy = parse_policy_log(run_info["output_dir"])
         spawn = verify_spawn_matches_config(spec, run_info["output_dir"])
