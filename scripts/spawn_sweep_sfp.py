@@ -314,9 +314,18 @@ def main() -> int:
     p.add_argument("--ws", type=Path, default=Path("/home/hariharan/ws_aic"))
     p.add_argument("--timeout-s", type=int, default=300)
     p.add_argument("--start-from", type=int, default=0,
-                   help="Skip seeds 0..start_from-1 (resume support).")
+                   help="Skip seeds 0..start_from-1 (resume / batch start).")
+    p.add_argument("--stop-at", type=int, default=None,
+                   help="Stop after seed stop_at-1 has run (exclusive upper "
+                        "bound). Use with --start-from for clean batches: "
+                        "--start-from 0 --stop-at 100 runs seeds [0,100); "
+                        "next call --start-from 100 --stop-at 200 continues. "
+                        "Always pass the same --n and --seed across batches "
+                        "so the global stratified-uniform plan is identical "
+                        "and contiguous slices stay distributionally uniform.")
     p.add_argument("--sweep-dir", type=Path, default=None,
-                   help="Reuse an existing sweep_dir (for resume). Default: new TS dir.")
+                   help="Reuse an existing sweep_dir (for resume / batching). "
+                        "Default: new TS dir.")
     args = p.parse_args()
 
     ws = args.ws
@@ -351,12 +360,27 @@ def main() -> int:
 
     # 2) Template + run.
     sweep_start = time.time()
-    results = []
+
+    # Load any prior batch's results so summary.json accumulates across
+    # batched invocations of the same sweep_dir. New results overwrite
+    # entries for the same seed (re-running a seed wipes the old record).
+    prior_results: list[dict] = []
+    summary_path = sweep_dir / "summary.json"
+    if summary_path.exists():
+        try:
+            prior = json.loads(summary_path.read_text())
+            prior_results = prior.get("results", [])
+        except Exception as exc:
+            print(f"WARN: could not parse existing summary.json: {exc}")
+    seeds_in_this_batch: set[int] = set()
+    results: list[dict] = list(prior_results)
 
     for spec in specs:
         seed = spec["seed"]
         if seed < args.start_from:
             continue
+        if args.stop_at is not None and seed >= args.stop_at:
+            break
         cfg = templated_config(base_yaml, spec)
         cfg_path = sweep_dir / "configs" / f"seed_{seed:02d}.yaml"
         cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
@@ -385,6 +409,8 @@ def main() -> int:
         policy = parse_policy_log(run_info["output_dir"])
         spawn = verify_spawn_matches_config(spec, run_info["output_dir"])
 
+        # Drop any prior result for this seed (re-run wins).
+        results = [r for r in results if r.get("seed") != seed]
         results.append({
             "seed": seed,
             "spec": spec,
@@ -396,25 +422,30 @@ def main() -> int:
             },
             "spawn_match": spawn,
         })
+        seeds_in_this_batch.add(seed)
 
         # Persist after each episode so a crash mid-sweep keeps progress.
+        results_sorted = sorted(results, key=lambda r: r["seed"])
         (sweep_dir / "summary.json").write_text(json.dumps({
             "n": args.n, "seed": args.seed,
             "started_at": dt.datetime.fromtimestamp(sweep_start).isoformat(timespec="seconds"),
             "elapsed_s": round(time.time() - sweep_start, 1),
-            "results": results,
+            "n_completed": len(results_sorted),
+            "results": results_sorted,
         }, indent=2) + "\n")
 
     total_elapsed = time.time() - sweep_start
 
     # 3) Summary print.
-    inserted_count = sum(1 for r in results if r["policy"].get("inserted") is True)
+    batch_results = [r for r in results if r["seed"] in seeds_in_this_batch]
+    inserted_count = sum(1 for r in batch_results if r["policy"].get("inserted") is True)
     print()
-    print(f"=== sweep complete in {total_elapsed:.1f}s "
+    print(f"=== batch complete in {total_elapsed:.1f}s "
           f"({total_elapsed/60:.1f} min) ===")
-    print(f"  episodes ran:    {len(results)}/{args.n}")
-    print(f"  inserted=True:   {inserted_count}/{len(results)}")
-    print(f"  sweep dir:       {sweep_dir}")
+    print(f"  episodes this batch: {len(batch_results)}")
+    print(f"  inserted=True:       {inserted_count}/{len(batch_results)}")
+    print(f"  cumulative:          {len(results)}/{args.n} seeds completed")
+    print(f"  sweep dir:           {sweep_dir}")
     return 0
 
 
