@@ -13,6 +13,10 @@
 # PORT is "sfp" or "sc"; selects single_trial_<PORT>.yaml.
 #
 # Options:
+#   --config PATH         Override the engine YAML path. Default:
+#                         single_trial_<PORT>.yaml in the engine config dir.
+#                         Used by the spawn-sweep tool to run templated
+#                         per-episode configs.
 #   --policy NAME         Policy class name from aic_example_policies.ros.
 #                         Default: CheatCodeMJ. CheatCode-family auto-enables
 #                         --ground-truth.
@@ -76,6 +80,7 @@ if [[ -z "$PORT" || ( "$PORT" != "sfp" && "$PORT" != "sc" ) ]]; then
 fi
 shift
 
+CONFIG_OVERRIDE=""
 POLICY="CheatCodeMJ"
 ENABLE_RECORD=1
 DATASET_ROOT=""
@@ -101,6 +106,7 @@ LAUNCH_RVIZ=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --config)        CONFIG_OVERRIDE="$2"; shift 2 ;;
         --policy)        POLICY="$2"; shift 2 ;;
         --no-record)     ENABLE_RECORD=0; shift ;;
         --dataset-root)  DATASET_ROOT="$2"; shift 2 ;;
@@ -135,7 +141,11 @@ SRC="$(cd "$SCRIPT_DIR/.." && pwd)"             # .../src/aic
 WS="$(cd "$SRC/../.." && pwd)"                   # .../ws_aic
 TS="$(date +%Y-%m-%d_%H%M%S)"
 
-CONFIG="$SRC/aic_engine/config/single_trial_${PORT}.yaml"
+if [[ -n "$CONFIG_OVERRIDE" ]]; then
+    CONFIG="$CONFIG_OVERRIDE"
+else
+    CONFIG="$SRC/aic_engine/config/single_trial_${PORT}.yaml"
+fi
 if [[ ! -f "$CONFIG" ]]; then
     echo "ERROR: config not found: $CONFIG" >&2
     exit 1
@@ -238,9 +248,17 @@ START="$(date +%s)"
 # ── Terminal 1 — engine + sim ────────────────────────────────────────────
 # Single-line bash -c with && chain matches run_scoring_loop.sh's pattern;
 # multi-line forms get flattened by distrobox's wrapping.
+#
+# AIC_USE_DOCKER_EXEC=1 swaps `distrobox enter -r` for `docker exec`. The
+# distrobox path needs sudo (rootful), which fails from non-TTY shells; the
+# docker-exec path works headlessly. Same container either way.
+ENGINE_CMD="export AIC_RESULTS_DIR='$OUTPUT_DIR' && exec /entrypoint.sh ground_truth:=$GROUND_TRUTH start_aic_engine:=true shutdown_on_aic_engine_exit:=true gazebo_gui:=$GAZEBO_GUI launch_rviz:=$LAUNCH_RVIZ aic_engine_config_file:='$CONFIG'"
 (
-    distrobox enter -r aic_eval -- \
-        bash -c "export AIC_RESULTS_DIR='$OUTPUT_DIR' && exec /entrypoint.sh ground_truth:=$GROUND_TRUTH start_aic_engine:=true shutdown_on_aic_engine_exit:=true gazebo_gui:=$GAZEBO_GUI launch_rviz:=$LAUNCH_RVIZ aic_engine_config_file:='$CONFIG'"
+    if [[ "${AIC_USE_DOCKER_EXEC:-0}" == "1" ]]; then
+        exec docker exec -i aic_eval bash -c "$ENGINE_CMD"
+    else
+        exec distrobox enter -r aic_eval -- bash -c "$ENGINE_CMD"
+    fi
 ) > "$T1_LOG" 2>&1 &
 T1_PID=$!
 
