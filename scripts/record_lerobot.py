@@ -18,8 +18,11 @@ Episodes are auto-bookended by the action status:
     STATUS_EXECUTING  →  open a new episode (writer lazy-inits on first obs)
     SUCCEEDED / ABORTED / CANCELED →  save_episode() and exit
 
-That start signal coincides with "engine done with arm-stabilization,
-policy starts publishing" — exactly when the user wants recording to begin.
+On the EXECUTING edge we drop any cached obs/action so the first written
+frame is anchored to the policy's first `pose_commands`. STATUS_EXECUTING
+itself fires before the policy starts driving, and `_latest.action` may
+already hold an engine-side home→hover slerp command — without the reset
+those frames bleed into the dataset.
 
 Runs as its own process, so the policy thread is never blocked on dataset I/O.
 
@@ -234,6 +237,7 @@ class AICAsyncRecorder(Node):
         multi_episode: bool,
         vcodec: str = "h264",
         use_videos: bool = True,
+        fixed_name: Optional[str] = None,
     ):
         super().__init__("aic_async_recorder")
         self._dataset_root = dataset_root.expanduser()
@@ -243,6 +247,7 @@ class AICAsyncRecorder(Node):
         self._multi_episode = multi_episode
         self._vcodec = vcodec
         self._use_videos = use_videos
+        self._fixed_name = fixed_name
 
         self._lock = Lock()
         self._latest = _Latest()
@@ -272,6 +277,14 @@ class AICAsyncRecorder(Node):
     def _on_obs(self, msg: Observation) -> None:
         with self._lock:
             self._latest.obs = msg
+        # Eagerly create the dataset writer on the first observation, BEFORE
+        # the policy starts driving. The LeRobotDataset.create call blocks
+        # the executor for a couple of seconds; doing it here means that
+        # block lands in the engine's idle window rather than in the middle
+        # of the policy's slerp, where we'd lose frames. record_episode.sh
+        # gates the policy launch on the WRITER_READY sentinel below.
+        if self._writer is None:
+            self._ensure_writer(msg)
 
     def _on_action(self, msg: MotionUpdate) -> None:
         with self._lock:
@@ -286,6 +299,11 @@ class AICAsyncRecorder(Node):
         if is_executing and not self._was_executing:
             self._open_episode()
             self._was_executing = True
+            with self._lock:
+                # Discard any pre-policy state so the first frame is anchored
+                # to the policy's first pose_commands (not a stale engine slerp).
+                self._latest.obs = None
+                self._latest.action = None
         elif self._was_executing and (not is_executing) and is_terminal:
             self._close_episode()
             self._was_executing = False
@@ -299,7 +317,7 @@ class AICAsyncRecorder(Node):
         spin the executor here because we are inside an executor callback.
         """
         self.get_logger().info(
-            "=== STATUS_EXECUTING — recording will start on first observation ==="
+            "=== STATUS_EXECUTING — waiting for policy's first pose_commands ==="
         )
 
     def _ensure_writer(self, obs: Observation) -> bool:
@@ -308,9 +326,13 @@ class AICAsyncRecorder(Node):
         ready."""
         if self._writer is not None:
             return True
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        repo_id = f"local/aic_recording_{ts}"
-        root = self._dataset_root / f"aic_recording_{ts}"
+        if self._fixed_name:
+            name = self._fixed_name
+        else:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            name = f"aic_recording_{ts}"
+        repo_id = f"local/{name}"
+        root = self._dataset_root / name
         h, w = obs.center_image.height, obs.center_image.width
         self.get_logger().info(
             f"=== Episode start → {root} (image {h}x{w}x3, repo_id={repo_id}) ==="
@@ -324,6 +346,9 @@ class AICAsyncRecorder(Node):
                 vcodec=self._vcodec,
                 use_videos=self._use_videos,
             )
+            # Sentinel for record_episode.sh — gates the policy launch.
+            print("WRITER_READY", flush=True)
+            self.get_logger().info("=== Writer ready ===")
             return True
         except Exception as e:
             self.get_logger().error(f"Failed to create writer: {e}")
@@ -415,7 +440,19 @@ def main(argv=None) -> int:
         help="Store images as PNG-per-frame instead of MP4 video. Faster "
         "save (no encoder), bigger disk.",
     )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Override the dataset subdirectory name. If set, the dataset is "
+        "written to <root>/<name>/ instead of the default "
+        "<root>/aic_recording_<TS>/. Use this to put the dataset under a "
+        "run-output dir (single-tree layout). Multi-episode mode does not "
+        "support --name (each episode would clash on the same path).",
+    )
     args = parser.parse_args(argv)
+
+    if args.name and args.multi:
+        parser.error("--name cannot be combined with --multi (path would clash)")
 
     rclpy.init()
     node = AICAsyncRecorder(
@@ -425,6 +462,7 @@ def main(argv=None) -> int:
         multi_episode=args.multi,
         vcodec=args.vcodec,
         use_videos=not args.no_videos,
+        fixed_name=args.name,
     )
     try:
         while rclpy.ok() and not node.done:

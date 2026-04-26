@@ -21,8 +21,11 @@
 #                         Default: CheatCodeMJ. CheatCode-family auto-enables
 #                         --ground-truth.
 #   --no-record           Skip the LeRobot recorder; just run the policy.
-#   --dataset-root DIR    Where to write the dataset.
-#                         Default: ~/ws_aic/aic_data.
+#   --dataset-root DIR    Where to write the dataset. By default the dataset
+#                         lands under the run dir as <run>/dataset/ (single
+#                         tree per trial). Passing this overrides that and
+#                         restores the legacy <root>/aic_recording_<TS>/
+#                         layout (used by spawn_sweep_sfp.py).
 #   --task PROMPT         Task prompt string written into each frame.
 #                         Default: derived from PORT.
 #   --vcodec CODEC        Video codec for the dataset (default: h264).
@@ -84,6 +87,7 @@ CONFIG_OVERRIDE=""
 POLICY="CheatCodeMJ"
 ENABLE_RECORD=1
 DATASET_ROOT=""
+DATASET_ROOT_USER_SET=0
 TASK_PROMPT=""
 VCODEC="h264"
 USE_VIDEOS=1
@@ -109,7 +113,7 @@ while [[ $# -gt 0 ]]; do
         --config)        CONFIG_OVERRIDE="$2"; shift 2 ;;
         --policy)        POLICY="$2"; shift 2 ;;
         --no-record)     ENABLE_RECORD=0; shift ;;
-        --dataset-root)  DATASET_ROOT="$2"; shift 2 ;;
+        --dataset-root)  DATASET_ROOT="$2"; DATASET_ROOT_USER_SET=1; shift 2 ;;
         --task)          TASK_PROMPT="$2"; shift 2 ;;
         --vcodec)        VCODEC="$2"; shift 2 ;;
         --no-videos)     USE_VIDEOS=0; shift ;;
@@ -151,11 +155,19 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 1
 fi
 
-: "${DATASET_ROOT:=$WS/aic_data}"
-mkdir -p "$DATASET_ROOT"
-
 OUTPUT_DIR="$WS/aic_results/recording_${TS}_${PORT}"
 mkdir -p "$OUTPUT_DIR"
+
+# Single-tree layout by default: dataset goes under the run dir as "dataset/".
+# If --dataset-root was passed (e.g. by spawn_sweep_sfp.py), keep the legacy
+# behavior so existing sweep tooling works unchanged.
+if [[ "$DATASET_ROOT_USER_SET" == "1" ]]; then
+    DATASET_NAME=""
+else
+    DATASET_ROOT="$OUTPUT_DIR"
+    DATASET_NAME="dataset"
+fi
+mkdir -p "$DATASET_ROOT"
 T1_LOG="$OUTPUT_DIR/terminal1_eval.log"
 T2_LOG="$OUTPUT_DIR/terminal2_policy.log"
 T3_LOG="$OUTPUT_DIR/terminal3_recorder.log"
@@ -282,6 +294,49 @@ if (( ready == 0 )); then
     echo "WARN: engine not ready after ${READY_WAIT}s — proceeding anyway"
 fi
 
+# ── Terminal 3 — LeRobot recorder (launched BEFORE policy) ───────────────
+# We launch the recorder first and wait for its WRITER_READY sentinel
+# before starting the policy. The LeRobotDataset.create call inside the
+# recorder blocks the executor for ~2-3 s wall on first observation; if
+# that block lands during the policy's slerp it eats the slerp frames.
+# Pre-creating the writer in the engine's idle window avoids that.
+T3_PID=""
+if [[ "$ENABLE_RECORD" == "1" ]]; then
+    RECORDER_ARGS=( --root "$DATASET_ROOT" --task "$TASK_PROMPT" --vcodec "$VCODEC" )
+    if [[ "$USE_VIDEOS" == "0" ]]; then
+        RECORDER_ARGS+=( --no-videos )
+    fi
+    if [[ -n "$DATASET_NAME" ]]; then
+        RECORDER_ARGS+=( --name "$DATASET_NAME" )
+    fi
+    (
+        cd "$SRC"
+        exec pixi run python "$SRC/scripts/record_lerobot.py" "${RECORDER_ARGS[@]}"
+    ) > "$T3_LOG" 2>&1 &
+    T3_PID=$!
+    echo "recorder:      pid $T3_PID, log $T3_LOG"
+
+    # Wait for WRITER_READY before launching the policy.
+    WRITER_WAIT=30
+    secs=0
+    while (( secs < WRITER_WAIT )); do
+        if grep -q "^WRITER_READY$" "$T3_LOG" 2>/dev/null; then
+            echo "│  recorder writer ready after ${secs}s"
+            break
+        fi
+        if ! kill -0 "$T3_PID" 2>/dev/null; then
+            echo "ERROR: recorder died before WRITER_READY. Last lines:" >&2
+            tail -n 20 "$T3_LOG" | sed 's/^/  /' >&2
+            exit 1
+        fi
+        sleep 1
+        secs=$((secs+1))
+    done
+    if ! grep -q "^WRITER_READY$" "$T3_LOG" 2>/dev/null; then
+        echo "WARN: recorder did not emit WRITER_READY after ${WRITER_WAIT}s — proceeding anyway"
+    fi
+fi
+
 # ── Terminal 2 — policy ───────────────────────────────────────────────────
 # Build the ROS-args parameter list, including any policy-specific overrides
 # (only emit -p flags when the user explicitly set them, so the policy's
@@ -319,24 +374,10 @@ if [[ -n "$HOVER_HOLD_S" ]]; then
 fi
 (
     cd "$SRC"
+    export AIC_RESULTS_DIR="$OUTPUT_DIR"
     exec pixi run ros2 run aic_model aic_model --ros-args "${POLICY_ARGS[@]}"
 ) > "$T2_LOG" 2>&1 &
 T2_PID=$!
-
-# ── Terminal 3 — LeRobot recorder ─────────────────────────────────────────
-T3_PID=""
-if [[ "$ENABLE_RECORD" == "1" ]]; then
-    RECORDER_ARGS=( --root "$DATASET_ROOT" --task "$TASK_PROMPT" --vcodec "$VCODEC" )
-    if [[ "$USE_VIDEOS" == "0" ]]; then
-        RECORDER_ARGS+=( --no-videos )
-    fi
-    (
-        cd "$SRC"
-        exec pixi run python "$SRC/scripts/record_lerobot.py" "${RECORDER_ARGS[@]}"
-    ) > "$T3_LOG" 2>&1 &
-    T3_PID=$!
-    echo "recorder:      pid $T3_PID, log $T3_LOG"
-fi
 
 echo "Run in progress. Ctrl-C in this terminal to abort."
 
@@ -396,10 +437,14 @@ cleanup_container
 DURATION=$(( $(date +%s) - START ))
 echo
 echo "Episode done in ${DURATION}s"
-echo "Logs:    $OUTPUT_DIR/"
+echo "Run dir: $OUTPUT_DIR/"
 if [[ "$ENABLE_RECORD" == "1" ]]; then
-    echo "Dataset: under $DATASET_ROOT/"
-    ls -dt "$DATASET_ROOT"/aic_recording_* 2>/dev/null | head -3 | sed 's/^/  /' || true
+    if [[ -n "$DATASET_NAME" ]]; then
+        echo "Dataset: $DATASET_ROOT/$DATASET_NAME/"
+    else
+        echo "Dataset: under $DATASET_ROOT/"
+        ls -dt "$DATASET_ROOT"/aic_recording_* 2>/dev/null | head -3 | sed 's/^/  /' || true
+    fi
 fi
 if [[ -f "$OUTPUT_DIR/scoring.yaml" ]]; then
     echo "Scoring: $OUTPUT_DIR/scoring.yaml"
