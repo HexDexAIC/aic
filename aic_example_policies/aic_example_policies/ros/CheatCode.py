@@ -43,7 +43,6 @@ class CheatCode(Policy):
         # subclassing CheatCode directly inherits these literals.
         self._max_integrator_windup = 0.05
         self._xy_integrator_gain = 0.15
-        self._xy_integrator_leak = 1.0   # 1.0 = no leak (legacy behavior)
         self._task = None
         super().__init__(parent_node)
 
@@ -148,15 +147,13 @@ class CheatCode(Policy):
             self._tip_x_error_integrator = 0.0
             self._tip_y_error_integrator = 0.0
         else:
-            # Leak first (decays old errors), then accumulate new error,
-            # then clamp. leak=1.0 → legacy pure-accumulator behaviour.
             self._tip_x_error_integrator = np.clip(
-                self._xy_integrator_leak * self._tip_x_error_integrator + tip_x_error,
+                self._tip_x_error_integrator + tip_x_error,
                 -self._max_integrator_windup,
                 self._max_integrator_windup,
             )
             self._tip_y_error_integrator = np.clip(
-                self._xy_integrator_leak * self._tip_y_error_integrator + tip_y_error,
+                self._tip_y_error_integrator + tip_y_error,
                 -self._max_integrator_windup,
                 self._max_integrator_windup,
             )
