@@ -69,6 +69,22 @@
     bad_port_offset_y: 0.0
     bad_offset_decay_per_retry: 1.0       # 1.0 = no decay; 0.5 = halve each retry
 
+    # ────────── descent stiffness + damping ────────────────────────────
+    # Impedance gains the controller uses ONLY during the descent phase.
+    # 6-vector: [Kx, Ky, Kz, Krx, Kry, Krz] for stiffness (N/m, N·m/rad)
+    # and damping. Defaults reproduce Policy.set_pose_target's library
+    # defaults exactly (90/90/90/50/50/50 stiffness, 50/50/50/20/20/20
+    # damping).
+    #
+    # To damp the descent oscillation, lower XY stiffness (softens lateral
+    # response so the integrator's commands cause less overshoot) and/or
+    # raise XY damping (resists fast lateral velocity changes). Keep Kz
+    # high enough to descend reliably. A reasonable first try:
+    #   descent_stiffness: [60.0, 60.0, 90.0, 50.0, 50.0, 50.0]
+    #   descent_damping:   [55.0, 55.0, 50.0, 20.0, 20.0, 20.0]
+    descent_stiffness: [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
+    descent_damping:   [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
+
     # ────────── final-release stiffness (anti-jolt) ────────────────────
     # Published before insert_cable returns. aic_controller holds the last
     # tool reference through entity-delete; this hold-current-pose msg

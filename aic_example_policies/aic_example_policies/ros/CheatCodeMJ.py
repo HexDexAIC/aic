@@ -235,9 +235,18 @@ class CheatCodeMJ(CheatCode):
         ):
             if not parent_node.has_parameter(name):
                 parent_node.declare_parameter(name, default)
+        # Descent-phase stiffness + damping. Defaults match Policy.set_pose_target
+        # defaults (i.e. legacy behaviour). Lowering Kx/Ky here makes the arm
+        # softer laterally during descent — fewer overshoots from the integrator,
+        # less oscillation. Damping rises with stiffness for critical-damped
+        # response. Kept as 6-vectors so any single axis can be tuned.
+        DESCENT_STIFFNESS_DEFAULT = [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
+        DESCENT_DAMPING_DEFAULT   = [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
         for name, default in (
             ("release_stiffness", RELEASE_STIFFNESS),
             ("release_damping", RELEASE_DAMPING),
+            ("descent_stiffness", DESCENT_STIFFNESS_DEFAULT),
+            ("descent_damping",   DESCENT_DAMPING_DEFAULT),
         ):
             if not parent_node.has_parameter(name):
                 parent_node.declare_parameter(name, default)
@@ -257,6 +266,8 @@ class CheatCodeMJ(CheatCode):
         # Override the parent CheatCode's hardcoded XY integrator constants.
         self._xy_integrator_gain = float(parent_node.get_parameter("xy_integrator_gain").value)
         self._max_integrator_windup = float(parent_node.get_parameter("xy_integrator_max_windup").value)
+        self._descent_stiffness = [float(v) for v in parent_node.get_parameter("descent_stiffness").value]
+        self._descent_damping   = [float(v) for v in parent_node.get_parameter("descent_damping").value]
         self.get_logger().info(
             f"CheatCodeMJ params: insertion_threshold_m={self._insertion_threshold}, "
             f"max_insertion_retries={self._max_retries}"
@@ -666,7 +677,11 @@ class CheatCodeMJ(CheatCode):
                         z_offset=z_offset,
                         reset_xy_integrator=False,
                     )
-                    self.set_pose_target(move_robot=move_robot, pose=pose)
+                    self.set_pose_target(
+                        move_robot=move_robot, pose=pose,
+                        stiffness=self._descent_stiffness,
+                        damping=self._descent_damping,
+                    )
                 except TransformException as ex:
                     self.get_logger().warn(f"Descent TF lookup failed: {ex}")
                 phase_label = "descent" if attempt == 0 else f"descent_retry_{attempt}"
