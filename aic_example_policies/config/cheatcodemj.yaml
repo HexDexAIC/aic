@@ -49,8 +49,13 @@
     # Higher gain → faster lateral correction, but risks overshoot/oscillation.
     # Higher windup clamp → more authority to fix large lateral drifts but
     # less safety against runaway integration. Reset between attempts.
+    # Each tick, before adding the new error: integrator *= leak. With
+    # leak < 1.0, old errors decay so the integrator forgets transients
+    # — best lever for damping oscillation. Try 0.92–0.98 if you see
+    # the descent zig-zag. leak = 1.0 keeps legacy behaviour.
     xy_integrator_gain: 0.15              # multiplies the clamped integrator
     xy_integrator_max_windup: 0.05        # clip on |integrator|, in metres
+    xy_integrator_leak: 1.0               # 1.0 = no leak (legacy); <1.0 damps
 
     # ────────── stuck-detection (early descent abort) ─────────────────
     # During descent, sample plug-port distance every tick. Once past

@@ -232,6 +232,7 @@ class CheatCodeMJ(CheatCode):
             # default lives in CheatCode.__init__; we override here.
             ("xy_integrator_gain", 0.15),
             ("xy_integrator_max_windup", 0.05),
+            ("xy_integrator_leak", 1.0),
         ):
             if not parent_node.has_parameter(name):
                 parent_node.declare_parameter(name, default)
@@ -257,6 +258,7 @@ class CheatCodeMJ(CheatCode):
         # Override the parent CheatCode's hardcoded XY integrator constants.
         self._xy_integrator_gain = float(parent_node.get_parameter("xy_integrator_gain").value)
         self._max_integrator_windup = float(parent_node.get_parameter("xy_integrator_max_windup").value)
+        self._xy_integrator_leak = float(parent_node.get_parameter("xy_integrator_leak").value)
         self.get_logger().info(
             f"CheatCodeMJ params: insertion_threshold_m={self._insertion_threshold}, "
             f"max_insertion_retries={self._max_retries}"
