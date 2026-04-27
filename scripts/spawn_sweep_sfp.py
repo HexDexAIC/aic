@@ -157,12 +157,16 @@ def run_one_episode(
     record_script: Path,
     config_path: Path,
     seed_dir: Path,
+    sweep_dataset_root: Path,
     timeout_s: int,
 ) -> dict:
-    """Run one episode into seed_dir (the single-tree per-seed dir).
+    """Run one episode into seed_dir (logs/bag/cheatcode_mj) with the
+    LeRobotDataset shared across all seeds at <sweep>/dataset/.
 
-    record_episode.sh's --output-dir lands all logs/bag/cheatcode_mj
-    output there; the dataset goes to <seed_dir>/dataset/.
+    First seed creates the shared dataset; subsequent seeds resume and
+    append a new episode. This produces a multi-episode LeRobotDataset
+    at the end of the sweep with no post-hoc consolidation needed —
+    it's ready to push directly to HF.
     """
     seed_dir.mkdir(parents=True, exist_ok=True)
     driver_log = seed_dir / "driver.log"
@@ -171,6 +175,8 @@ def run_one_episode(
         str(record_script), "sfp",
         "--config", str(config_path),
         "--output-dir", str(seed_dir),
+        "--dataset-root", str(sweep_dataset_root),
+        "--dataset-name", "dataset",
         "--timeout", str(timeout_s),
     ]
 
@@ -229,9 +235,10 @@ def parse_policy_log(output_dir: str) -> dict:
     }
 
 
-def find_dataset(seed_dir: Path) -> Path | None:
-    """Return <seed_dir>/dataset/ if it exists and has data."""
-    ds = seed_dir / "dataset"
+def find_dataset(sweep_dir: Path) -> Path | None:
+    """Return <sweep_dir>/dataset/ if it exists (the sweep's shared
+    multi-episode LeRobotDataset)."""
+    ds = sweep_dir / "dataset"
     if ds.is_dir() and (ds / "meta" / "info.json").exists():
         return ds
     return None
@@ -398,13 +405,14 @@ def main() -> int:
             record_script=record_script,
             config_path=cfg_path,
             seed_dir=seed_dir,
+            sweep_dataset_root=sweep_dir,
             timeout_s=args.timeout_s,
         )
         print(f"  → exit={run_info['exit_code']} "
               f"elapsed={run_info['elapsed_s']}s", flush=True)
 
-        # Per-episode summary: dataset, policy log, spawn match.
-        ds_dir = find_dataset(seed_dir)
+        # Per-episode summary: dataset (shared sweep-level), policy log, spawn match.
+        ds_dir = find_dataset(sweep_dir)
         ds_check = validate_dataset(ds_dir) if ds_dir else {"ok": False, "reason": "no dataset"}
         policy = parse_policy_log(run_info["output_dir"])
         spawn = verify_spawn_matches_config(spec, run_info["output_dir"])

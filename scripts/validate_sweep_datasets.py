@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Deep-validate every dataset produced by spawn_sweep_sfp.py.
+"""Deep-validate the shared dataset produced by spawn_sweep_sfp.py.
 
-For each <sweep_dir>/seeds/seed_NN/dataset/:
+For <sweep_dir>/dataset/ (one multi-episode LeRobotDataset, one episode
+per seed) — and per-episode stats sliced by episode_index in the parquet:
   - parse meta/info.json (schema check)
   - read first-chunk parquet (column existence, frame count agreement)
   - check 6-D rotation columns are unit-norm at the first frame
@@ -24,12 +25,63 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 
-def find_dataset(seed_dir: Path) -> Path | None:
-    """Return <seed_dir>/dataset/ if it has a valid info.json."""
-    ds = seed_dir / "dataset"
+def find_dataset(sweep_dir: Path) -> Path | None:
+    """Return <sweep_dir>/dataset/ if it has a valid info.json."""
+    ds = sweep_dir / "dataset"
     if ds.is_dir() and (ds / "meta" / "info.json").exists():
         return ds
     return None
+
+
+def per_episode_stats(ds: Path) -> list[dict]:
+    """Slice the dataset parquet(s) by episode_index and report per-episode
+    frames + 6-D rotation unit-norm at first frame.
+
+    LeRobot v3.0 writes one parquet per episode under chunk-000/, so read
+    them all and concatenate before slicing.
+    """
+    chunks = sorted((ds / "data").glob("chunk-*/file-*.parquet"))
+    if not chunks:
+        return []
+    eps: list[int] = []
+    states: list[list[float]] = []
+    actions: list[list[float]] = []
+    for c in chunks:
+        tbl = pq.read_table(c, columns=["episode_index",
+                                        "observation.state",
+                                        "action"])
+        eps.extend(tbl.column("episode_index").to_pylist())
+        states.extend(tbl.column("observation.state").to_pylist())
+        actions.extend(tbl.column("action").to_pylist())
+    by_ep: dict[int, list[int]] = {}
+    for i, ep in enumerate(eps):
+        by_ep.setdefault(ep, []).append(i)
+
+    rows = []
+    for ep in sorted(by_ep):
+        idxs = by_ep[ep]
+        n = len(idxs)
+        # Rotation columns at first frame of this episode.
+        s0 = states[idxs[0]]
+        a0 = actions[idxs[0]]
+        def col_norm(v: list[float], offs: int) -> float:
+            return math.sqrt(sum(x * x for x in v[offs:offs + 3]))
+        rot_ok = all(
+            abs(c - 1.0) < 1e-3
+            for c in (col_norm(s0, 3), col_norm(s0, 6),
+                      col_norm(a0, 3), col_norm(a0, 6))
+        )
+        # action.z range over this episode.
+        z_vals = [actions[i][2] for i in idxs]
+        z_range = max(z_vals) - min(z_vals) if z_vals else 0.0
+        rows.append({
+            "episode_index": ep,
+            "frames": n,
+            "rot_unit_ok": rot_ok,
+            "action_z_range_m": z_range,
+            "ok": rot_ok and z_range > 0.05,
+        })
+    return rows
 
 
 def first_parquet(ds: Path) -> Path | None:
@@ -59,8 +111,8 @@ def check_dataset(ds: Path) -> dict:
         and total_episodes >= 1
     )
 
-    pq_path = first_parquet(ds)
-    if pq_path is None:
+    pq_paths = sorted((ds / "data").glob("chunk-*/file-*.parquet"))
+    if not pq_paths:
         return {
             "ok": False, "reason": "no parquet",
             "schema_ok": schema_ok, "info": {
@@ -71,7 +123,11 @@ def check_dataset(ds: Path) -> dict:
         }
 
     try:
-        tbl = pq.read_table(pq_path, columns=["observation.state", "action"])
+        # LeRobot v3.0 writes one parquet per episode in chunk-000/.
+        import pyarrow as pa
+        tables = [pq.read_table(p, columns=["observation.state", "action"])
+                  for p in pq_paths]
+        tbl = pa.concat_tables(tables)
     except Exception as e:
         return {"ok": False, "reason": f"parquet read failed: {e!r}",
                 "schema_ok": schema_ok}
@@ -137,34 +193,33 @@ def main() -> int:
         return 2
     sweep_dir = Path(sys.argv[1])
 
-    seeds = sorted((sweep_dir / "seeds").glob("seed_*"))
-    results = []
-    ok_count = 0
-    for seed_dir in seeds:
-        seed = int(seed_dir.name.split("_")[1])
-        ds = find_dataset(seed_dir)
-        if ds is None:
-            results.append({"seed": seed, "ok": False, "reason": "no dataset dir"})
-            continue
-        r = check_dataset(ds)
-        r["seed"] = seed
-        r["dataset"] = str(ds)
-        results.append(r)
-        if r.get("ok"):
-            ok_count += 1
+    ds = find_dataset(sweep_dir)
+    if ds is None:
+        print(f"no shared dataset at {sweep_dir}/dataset/", file=sys.stderr)
+        return 1
+
+    overall = check_dataset(ds)
+    episodes = per_episode_stats(ds)
+    n_ep_ok = sum(1 for e in episodes if e.get("ok"))
 
     out = {
-        "n_total": len(seeds),
-        "n_ok": ok_count,
-        "results": results,
+        "dataset": str(ds),
+        "overall": overall,
+        "n_episodes": len(episodes),
+        "n_episodes_ok": n_ep_ok,
+        "episodes": episodes,
     }
     (sweep_dir / "dataset_validation.json").write_text(
         json.dumps(out, indent=2) + "\n"
     )
-    print(f"validated {ok_count}/{len(seeds)} datasets ok")
-    for r in results:
-        if not r.get("ok"):
-            print(f"  seed {r['seed']:02d}: FAIL — {r.get('reason') or 'see json'}")
+    overall_ok = "ok" if overall.get("ok") else "FAIL"
+    print(f"shared dataset: {overall_ok} "
+          f"({overall.get('episodes')} episodes, "
+          f"{overall.get('frames')} frames)")
+    print(f"per-episode: {n_ep_ok}/{len(episodes)} ok")
+    for e in episodes:
+        if not e.get("ok"):
+            print(f"  ep {e['episode_index']:02d}: FAIL — {e}")
     return 0
 
 

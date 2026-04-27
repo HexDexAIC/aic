@@ -93,6 +93,7 @@ POLICY="CheatCodeMJ"
 ENABLE_RECORD=1
 DATASET_ROOT=""
 DATASET_ROOT_USER_SET=0
+DATASET_NAME_OVERRIDE=""
 TASK_PROMPT=""
 VCODEC="h264"
 USE_VIDEOS=1
@@ -120,6 +121,7 @@ while [[ $# -gt 0 ]]; do
         --policy)        POLICY="$2"; shift 2 ;;
         --no-record)     ENABLE_RECORD=0; shift ;;
         --dataset-root)  DATASET_ROOT="$2"; DATASET_ROOT_USER_SET=1; shift 2 ;;
+        --dataset-name)  DATASET_NAME_OVERRIDE="$2"; shift 2 ;;
         --task)          TASK_PROMPT="$2"; shift 2 ;;
         --vcodec)        VCODEC="$2"; shift 2 ;;
         --no-videos)     USE_VIDEOS=0; shift ;;
@@ -169,9 +171,12 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 # Single-tree layout by default: dataset goes under the run dir as "dataset/".
-# If --dataset-root was passed (e.g. by spawn_sweep_sfp.py), keep the legacy
-# behavior so existing sweep tooling works unchanged.
-if [[ "$DATASET_ROOT_USER_SET" == "1" ]]; then
+# spawn_sweep_sfp.py passes --dataset-root <sweep> --dataset-name dataset
+# so all seeds share <sweep>/dataset/ and the recorder appends episodes
+# via LeRobotDataset.resume — ready to push to HF without a consolidate step.
+if [[ -n "$DATASET_NAME_OVERRIDE" ]]; then
+    DATASET_NAME="$DATASET_NAME_OVERRIDE"
+elif [[ "$DATASET_ROOT_USER_SET" == "1" ]]; then
     DATASET_NAME=""
 else
     DATASET_ROOT="$OUTPUT_DIR"

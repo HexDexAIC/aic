@@ -10,6 +10,7 @@
 # (the one containing data/, videos/, meta/).
 set -euo pipefail
 
+EPISODE_INDEX=0
 if [[ "${2:-}" == "--direct" ]]; then
     DS="$1"
     SAVE=0
@@ -19,12 +20,19 @@ elif [[ $# -lt 2 ]]; then
     exit 2
 else
     SWEEP="$1"
-    SEED=$(printf "%02d" "$2")
+    SEED="$2"
+    EPISODE_INDEX="$SEED"     # one episode per seed in the shared dataset
     SAVE=0
     [[ "${3:-}" == "--save" ]] && SAVE=1
-    DS="$SWEEP/seeds/seed_$SEED/dataset"
-    if [[ ! -d "$DS" ]]; then
-        echo "ERROR: no dataset/ under $SWEEP/seeds/seed_$SEED/" >&2
+    if [[ -d "$SWEEP/dataset" ]]; then
+        # New shared-dataset layout — one multi-episode dataset per sweep.
+        DS="$SWEEP/dataset"
+    elif [[ -d "$SWEEP/seeds/seed_$(printf '%02d' "$SEED")/dataset" ]]; then
+        # Legacy per-seed dataset layout.
+        DS="$SWEEP/seeds/seed_$(printf '%02d' "$SEED")/dataset"
+        EPISODE_INDEX=0
+    else
+        echo "ERROR: no dataset under $SWEEP/dataset or $SWEEP/seeds/seed_*/dataset/" >&2
         exit 1
     fi
 fi
@@ -46,11 +54,11 @@ cd "$SRC"
 # multi-worker loader exhausts /dev/shm and crashes mid-stream with
 # "DataLoader worker killed by signal: Bus error".
 if (( SAVE )); then
-    OUT=/tmp/$(basename "$DS").rrd
+    OUT=/tmp/$(basename "$DS")_ep${EPISODE_INDEX}.rrd
     pixi run lerobot-dataset-viz \
         --repo-id "$REPO_ID" \
         --root "$DS" \
-        --episode-index 0 \
+        --episode-index "$EPISODE_INDEX" \
         --num-workers 0 \
         --save 1 \
         --output-dir /tmp
@@ -60,6 +68,6 @@ else
     pixi run lerobot-dataset-viz \
         --repo-id "$REPO_ID" \
         --root "$DS" \
-        --episode-index 0 \
+        --episode-index "$EPISODE_INDEX" \
         --num-workers 0
 fi

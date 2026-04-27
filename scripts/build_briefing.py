@@ -67,8 +67,13 @@ def main() -> int:
 
     spawn_matched = spawn["n_matched"] if spawn else 0
     spawn_checked = spawn["n_checked"] if spawn else 0
-    val_ok = val["n_ok"] if val else 0
-    val_total = val["n_total"] if val else 0
+    # New shared-dataset format reports n_episodes/n_episodes_ok; the older
+    # per-seed format used n_total/n_ok. Support both.
+    if val:
+        val_ok = val.get("n_episodes_ok", val.get("n_ok", 0))
+        val_total = val.get("n_episodes", val.get("n_total", 0))
+    else:
+        val_ok = val_total = 0
 
     # Per-seed rows
     rows = []
@@ -85,8 +90,11 @@ def main() -> int:
                     break
         val_row = None
         if val:
-            for vr in val["results"]:
-                if vr["seed"] == seed:
+            # New shared-dataset format keys per-episode entries by
+            # episode_index (which equals seed); older format used 'seed'.
+            ep_list = val.get("episodes") or val.get("results") or []
+            for vr in ep_list:
+                if vr.get("episode_index", vr.get("seed")) == seed:
                     val_row = vr
                     break
         ins = pol.get("inserted")

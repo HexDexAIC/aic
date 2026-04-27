@@ -22,22 +22,58 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 
-def find_dataset(seed_dir: Path) -> Path | None:
-    """Return <seed_dir>/dataset/ if it exists."""
-    ds = seed_dir / "dataset"
-    return ds if ds.is_dir() else None
+def find_shared_dataset(sweep_dir: Path) -> Path | None:
+    """Return <sweep_dir>/dataset/ if present (the sweep's shared
+    multi-episode LeRobotDataset)."""
+    ds = sweep_dir / "dataset"
+    if ds.is_dir() and (ds / "meta" / "info.json").exists():
+        return ds
+    return None
 
 
-def episode_stats(ds: Path) -> dict:
-    """Pull per-frame stats from the parquet."""
+def load_episode_rows(ds: Path) -> dict[int, list[int]]:
+    """Map episode_index → list of row indices in the parquet."""
     pq_files = sorted((ds / "data").glob("chunk-*/file-*.parquet"))
     if not pq_files:
         return {}
-    tbl = pq.read_table(pq_files[0],
-                        columns=["observation.state", "action"])
-    n = tbl.num_rows
-    states = tbl.column("observation.state").to_pylist()
-    actions = tbl.column("action").to_pylist()
+    tbl = pq.read_table(pq_files[0], columns=["episode_index"])
+    eps = tbl.column("episode_index").to_pylist()
+    by_ep: dict[int, list[int]] = {}
+    for i, e in enumerate(eps):
+        by_ep.setdefault(e, []).append(i)
+    return by_ep
+
+
+def episode_stats_from_shared(ds: Path, ep_idx: int,
+                              cache: dict | None = None) -> dict:
+    """Pull per-frame stats for episode ep_idx from the shared dataset.
+
+    LeRobot v3.0 writes one parquet per episode in chunk-000/, so we
+    concatenate them all and slice by episode_index.
+    """
+    pq_files = sorted((ds / "data").glob("chunk-*/file-*.parquet"))
+    if not pq_files:
+        return {}
+    if cache is None or "tbl" not in cache:
+        import pyarrow as pa
+        tables = [pq.read_table(p, columns=["episode_index",
+                                            "observation.state",
+                                            "action"])
+                  for p in pq_files]
+        tbl = pa.concat_tables(tables)
+        if cache is not None:
+            cache["tbl"] = tbl
+    else:
+        tbl = cache["tbl"]
+    eps = tbl.column("episode_index").to_pylist()
+    rows = [i for i, e in enumerate(eps) if e == ep_idx]
+    if not rows:
+        return {}
+    states_full = tbl.column("observation.state").to_pylist()
+    actions_full = tbl.column("action").to_pylist()
+    states = [states_full[i] for i in rows]
+    actions = [actions_full[i] for i in rows]
+    n = len(rows)
 
     # observation.state layout: 0:3 = pos, 3:9 = rot6, 9:12 = lin vel,
     # 12:15 = ang vel, 15:18 = F (N), 18:21 = tau (N·m), 21:27 = joints.
@@ -81,18 +117,24 @@ def main() -> int:
 
     by_seed_summary = {r["seed"]: r for r in summary["results"]}
     by_seed_spawn = {r["seed"]: r for r in spawn["results"]}
-    by_seed_val = {r["seed"]: r for r in val["results"]}
+    by_ep_val = {e["episode_index"]: e for e in val.get("episodes", [])}
+
+    shared_ds = find_shared_dataset(sweep)
+    cache: dict = {}
 
     rows = []
     for spec in samples:
         seed = spec["seed"]
         sm = by_seed_summary[seed]
         sp = by_seed_spawn.get(seed, {})
-        vl = by_seed_val.get(seed, {})
+        # Episode index in the shared dataset == seed (one episode per seed,
+        # appended in seed order).
+        vl = by_ep_val.get(seed, {})
 
-        seed_dir = sweep / "seeds" / f"seed_{seed:02d}"
-        ds_dir = find_dataset(seed_dir)
-        stats = episode_stats(ds_dir) if ds_dir else {}
+        if shared_ds is not None:
+            stats = episode_stats_from_shared(shared_ds, seed, cache=cache)
+        else:
+            stats = {}
 
         rows.append({
             "seed": seed,

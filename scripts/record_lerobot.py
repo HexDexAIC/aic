@@ -197,14 +197,25 @@ class _Writer:
                 "names": ["kx", "ky", "kz", "krx", "kry", "krz"],
             },
         }
-        self.dataset = LeRobotDataset.create(
-            repo_id=repo_id,
-            fps=fps,
-            features=features,
-            root=str(root),
-            use_videos=use_videos,
-            vcodec=vcodec,
-        )
+        info_path = Path(root) / "meta" / "info.json"
+        if info_path.exists():
+            # Existing dataset: append a new episode (resume mode). Used by
+            # the spawn-sweep flow where every seed writes into one shared
+            # dataset → no post-hoc consolidation before pushing to HF.
+            self.dataset = LeRobotDataset.resume(
+                repo_id=repo_id,
+                root=str(root),
+                vcodec=vcodec,
+            )
+        else:
+            self.dataset = LeRobotDataset.create(
+                repo_id=repo_id,
+                fps=fps,
+                features=features,
+                root=str(root),
+                use_videos=use_videos,
+                vcodec=vcodec,
+            )
         self.frames_in_episode = 0
 
     def add_frame(self, frame: dict) -> None:

@@ -37,19 +37,22 @@ def policy_succeeded(output_dir: str) -> bool:
     return False
 
 
-def find_dataset(seed_dir: Path) -> Path | None:
-    """Return <seed_dir>/dataset/ if present."""
-    ds = seed_dir / "dataset"
-    return ds if ds.is_dir() else None
+def find_shared_dataset(sweep_dir: Path) -> Path | None:
+    """Return <sweep_dir>/dataset/ if present (the sweep's shared dataset)."""
+    ds = sweep_dir / "dataset"
+    return ds if (ds.is_dir() and (ds / "meta" / "info.json").exists()) else None
 
 
 def run_one(record_script: Path, cfg_path: Path, seed_dir: Path,
-            timeout_s: int) -> dict:
-    """Re-run one seed, single-tree layout under seed_dir."""
+            sweep_dir: Path, timeout_s: int) -> dict:
+    """Re-run one seed; logs/bag wipe-and-replace in seed_dir, dataset
+    appends a new episode to the sweep's shared dataset."""
     import shutil
     if seed_dir.exists():
-        # Wipe the previous attempt; bag/dataset/etc. would otherwise
-        # collide. Keep the parent dirs.
+        # Wipe the previous run's logs/bag/cheatcode_mj. The shared
+        # dataset at <sweep>/dataset/ is NOT wiped — the failed seed
+        # presumably never reached save_episode (no dataset row added),
+        # and the new run will append a fresh episode.
         for child in seed_dir.iterdir():
             if child.is_dir():
                 shutil.rmtree(child, ignore_errors=True)
@@ -64,6 +67,8 @@ def run_one(record_script: Path, cfg_path: Path, seed_dir: Path,
         str(record_script), "sfp",
         "--config", str(cfg_path),
         "--output-dir", str(seed_dir),
+        "--dataset-root", str(sweep_dir),
+        "--dataset-name", "dataset",
         "--timeout", str(timeout_s),
     ]
     start = time.time()
@@ -106,7 +111,7 @@ def main() -> int:
         for attempt in range(1, args.max_retries + 1):
             print(f"seed {seed:02d}: retry attempt {attempt}", flush=True)
             run_info = run_one(record_script, cfg_path, seed_dir,
-                               args.timeout_s)
+                               sweep, args.timeout_s)
             if policy_succeeded(run_info["output_dir"]):
                 # Update summary.json in place.
                 for r in summary["results"]:
@@ -138,7 +143,7 @@ def main() -> int:
                                 break
                         r["run"] = {**r.get("run", {}), **run_info,
                                      "retry_attempt": attempt}
-                        ds = find_dataset(seed_dir)
+                        ds = find_shared_dataset(sweep)
                         if ds:
                             r["dataset"]["path"] = str(ds)
                 summary_path.write_text(json.dumps(summary, indent=2) + "\n")
