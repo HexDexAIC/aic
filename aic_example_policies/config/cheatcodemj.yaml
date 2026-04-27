@@ -19,29 +19,38 @@
     # min-jerk profile from APPROACH_Z_OFFSET → -INSERTION_DEPTH.
     # Slower descent = more integrator settling time + lower peak velocity.
     # SC's variance lives here, so we keep its descent slow.
-    descent_time_sfp: 14.0          # was 9.0 — slowed for cleaner training data
+    descent_time_sfp: 12.0                # was 9.0 — slowed for cleaner training data
     descent_time_sc: 12.0
 
     # ────────── approach timing (per plug type) ────────────────────────
     # min-jerk profile from current TCP → pre-hover above port.
-    approach_time_sfp: 3.5
+    approach_time_sfp: 6.0
     approach_time_sc: 4.0
 
     # ────────── hover height above port (per plug type) ────────────────
     # SFP needs 20 cm to clear NIC card body.
     # SC ports are board-flush — 12 cm is enough and lets integrator settle less.
-    approach_z_offset_sfp: 0.20
+    approach_z_offset_sfp: 0.18
     approach_z_offset_sc: 0.12
 
     # ────────── insertion + settle ─────────────────────────────────────
     insertion_depth: 0.015                # how far below port surface to push
-    settle_time_sfp: 1.5                  # post-descent dwell before checking insertion
+    settle_time_sfp: 1.0                  # post-descent dwell before checking insertion
     settle_time_sc: 2.0
-    control_rate_hz: 20.0                 # policy publishes pose_commands at this rate
+    control_rate_hz: 25.0                 # policy publishes pose_commands at this rate
 
     # ────────── retry-path timing ──────────────────────────────────────
     lift_time_frac: 0.5                   # lift-back-to-hover takes this fraction of descent_time
     hover_hold_s: 0.5                     # steady-state dwell at hover before retry descent
+
+    # ────────── XY integrator (lateral drift correction) ──────────────
+    # During descent, calc_gripper_pose accumulates port-vs-plug XY error
+    # into an integrator and shifts the descent target by gain * integrator.
+    # Higher gain → faster lateral correction, but risks overshoot/oscillation.
+    # Higher windup clamp → more authority to fix large lateral drifts but
+    # less safety against runaway integration. Reset between attempts.
+    xy_integrator_gain: 0.15              # multiplies the clamped integrator
+    xy_integrator_max_windup: 0.05        # clip on |integrator|, in metres
 
     # ────────── stuck-detection (early descent abort) ─────────────────
     # During descent, sample plug-port distance every tick. Once past

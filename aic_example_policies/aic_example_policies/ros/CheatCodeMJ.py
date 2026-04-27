@@ -228,6 +228,10 @@ class CheatCodeMJ(CheatCode):
             ("settle_time_sc", SETTLE_TIME_SC),
             ("control_rate_hz", CONTROL_RATE_HZ),
             ("release_hold_time", RELEASE_HOLD_TIME),
+            # XY integrator (lateral correction during descent). Inherited
+            # default lives in CheatCode.__init__; we override here.
+            ("xy_integrator_gain", 0.15),
+            ("xy_integrator_max_windup", 0.05),
         ):
             if not parent_node.has_parameter(name):
                 parent_node.declare_parameter(name, default)
@@ -250,6 +254,9 @@ class CheatCodeMJ(CheatCode):
         self._release_hold_time = float(parent_node.get_parameter("release_hold_time").value)
         self._release_stiffness = [float(v) for v in parent_node.get_parameter("release_stiffness").value]
         self._release_damping = [float(v) for v in parent_node.get_parameter("release_damping").value]
+        # Override the parent CheatCode's hardcoded XY integrator constants.
+        self._xy_integrator_gain = float(parent_node.get_parameter("xy_integrator_gain").value)
+        self._max_integrator_windup = float(parent_node.get_parameter("xy_integrator_max_windup").value)
         self.get_logger().info(
             f"CheatCodeMJ params: insertion_threshold_m={self._insertion_threshold}, "
             f"max_insertion_retries={self._max_retries}"
