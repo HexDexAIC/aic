@@ -212,6 +212,44 @@ class CheatCodeMJ(CheatCode):
         self._hover_hold_s = float(
             parent_node.get_parameter("hover_hold_s").value
         )
+        # ── Phase timing + geometry (used to be module constants) ─────
+        # Defaults bundled in aic_example_policies/config/cheatcode_mj.yaml;
+        # record_episode.sh passes that file via --params-file. CLI
+        # `-p name:=value` overrides.
+        for name, default in (
+            ("approach_time_sfp", APPROACH_TIME_SFP),
+            ("approach_time_sc", APPROACH_TIME_SC),
+            ("descent_time_sfp", DESCENT_TIME_SFP),
+            ("descent_time_sc", DESCENT_TIME_SC),
+            ("approach_z_offset_sfp", APPROACH_Z_OFFSET_SFP),
+            ("approach_z_offset_sc", APPROACH_Z_OFFSET_SC),
+            ("insertion_depth", INSERTION_DEPTH),
+            ("settle_time_sfp", SETTLE_TIME_SFP),
+            ("settle_time_sc", SETTLE_TIME_SC),
+            ("control_rate_hz", CONTROL_RATE_HZ),
+            ("release_hold_time", RELEASE_HOLD_TIME),
+        ):
+            if not parent_node.has_parameter(name):
+                parent_node.declare_parameter(name, default)
+        for name, default in (
+            ("release_stiffness", RELEASE_STIFFNESS),
+            ("release_damping", RELEASE_DAMPING),
+        ):
+            if not parent_node.has_parameter(name):
+                parent_node.declare_parameter(name, default)
+        self._approach_time_sfp = float(parent_node.get_parameter("approach_time_sfp").value)
+        self._approach_time_sc = float(parent_node.get_parameter("approach_time_sc").value)
+        self._descent_time_sfp = float(parent_node.get_parameter("descent_time_sfp").value)
+        self._descent_time_sc = float(parent_node.get_parameter("descent_time_sc").value)
+        self._approach_z_offset_sfp = float(parent_node.get_parameter("approach_z_offset_sfp").value)
+        self._approach_z_offset_sc = float(parent_node.get_parameter("approach_z_offset_sc").value)
+        self._insertion_depth = float(parent_node.get_parameter("insertion_depth").value)
+        self._settle_time_sfp = float(parent_node.get_parameter("settle_time_sfp").value)
+        self._settle_time_sc = float(parent_node.get_parameter("settle_time_sc").value)
+        self._control_rate_hz = float(parent_node.get_parameter("control_rate_hz").value)
+        self._release_hold_time = float(parent_node.get_parameter("release_hold_time").value)
+        self._release_stiffness = [float(v) for v in parent_node.get_parameter("release_stiffness").value]
+        self._release_damping = [float(v) for v in parent_node.get_parameter("release_damping").value]
         self.get_logger().info(
             f"CheatCodeMJ params: insertion_threshold_m={self._insertion_threshold}, "
             f"max_insertion_retries={self._max_retries}"
@@ -347,10 +385,10 @@ class CheatCodeMJ(CheatCode):
         self.set_pose_target(
             move_robot=move_robot,
             pose=hold_pose,
-            stiffness=RELEASE_STIFFNESS,
-            damping=RELEASE_DAMPING,
+            stiffness=self._release_stiffness,
+            damping=self._release_damping,
         )
-        self.sleep_for(RELEASE_HOLD_TIME)
+        self.sleep_for(self._release_hold_time)
 
     # ------------------------------------------------------------------
     # Main entry
@@ -407,20 +445,20 @@ class CheatCodeMJ(CheatCode):
         # the same reason.
         plug_type_lower = (task.plug_type or "").lower()
         if plug_type_lower == "sc":
-            approach_z_offset = APPROACH_Z_OFFSET_SC
-            approach_time = APPROACH_TIME_SC
-            descent_time = DESCENT_TIME_SC
-            settle_time = SETTLE_TIME_SC
+            approach_z_offset = self._approach_z_offset_sc
+            approach_time = self._approach_time_sc
+            descent_time = self._descent_time_sc
+            settle_time = self._settle_time_sc
         elif plug_type_lower == "sfp":
-            approach_z_offset = APPROACH_Z_OFFSET_SFP
-            approach_time = APPROACH_TIME_SFP
-            descent_time = DESCENT_TIME_SFP
-            settle_time = SETTLE_TIME_SFP
+            approach_z_offset = self._approach_z_offset_sfp
+            approach_time = self._approach_time_sfp
+            descent_time = self._descent_time_sfp
+            settle_time = self._settle_time_sfp
         else:
-            approach_z_offset = APPROACH_Z_OFFSET_SFP
-            approach_time = APPROACH_TIME_SC
-            descent_time = DESCENT_TIME_SC
-            settle_time = SETTLE_TIME_SC
+            approach_z_offset = self._approach_z_offset_sfp
+            approach_time = self._approach_time_sc
+            descent_time = self._descent_time_sc
+            settle_time = self._settle_time_sc
 
         self._write_summary(
             summary,
@@ -445,12 +483,12 @@ class CheatCodeMJ(CheatCode):
             approach_z_offset_m=approach_z_offset,  # chosen by plug_type
             plug_type=plug_type_lower,
             descent_time_s=descent_time,
-            insertion_depth_m=INSERTION_DEPTH,
+            insertion_depth_m=self._insertion_depth,
             settle_time_s=settle_time,
-            control_rate_hz=CONTROL_RATE_HZ,
+            control_rate_hz=self._control_rate_hz,
         )
 
-        dt = 1.0 / CONTROL_RATE_HZ
+        dt = 1.0 / self._control_rate_hz
 
         # ============================================================
         # Phase A — approach: interp_fraction 0 → 1 on min-jerk.
@@ -538,7 +576,7 @@ class CheatCodeMJ(CheatCode):
                 # Duration scales proportionally with the distance to cover
                 # so a small lift doesn't take the same time as a full one.
                 lift_distance = approach_z_offset - last_z_offset
-                full_lift_distance = approach_z_offset - (-INSERTION_DEPTH)
+                full_lift_distance = approach_z_offset - (-self._insertion_depth)
                 lift_duration = max(
                     0.5,  # floor so very small lifts still have a sane min-jerk
                     descent_time * self._lift_time_frac
@@ -601,7 +639,7 @@ class CheatCodeMJ(CheatCode):
 
             # Descent
             descent_traj = _scalar_trajectory(
-                approach_z_offset, -INSERTION_DEPTH, descent_time
+                approach_z_offset, -self._insertion_depth, descent_time
             )
             t0 = self.time_now()
             stuck_distances: deque = deque()  # (elapsed, dist_to_real_port)

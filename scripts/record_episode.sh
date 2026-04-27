@@ -25,6 +25,9 @@
 #                         aic_results/recording_<TS>_<PORT>/. Used by
 #                         spawn_sweep_sfp.py to land each seed under
 #                         <sweep_dir>/seeds/seed_NN/.
+#   --policy-config PATH  Path to a ROS2 params YAML for the policy. Default:
+#                         aic_example_policies/config/<policy>.yaml (lowercased).
+#                         CLI -p flags below still override individual values.
 #   --dataset-root DIR    Where to write the dataset. By default the dataset
 #                         lands under the run dir as <run>/dataset/ (single
 #                         tree per trial). Passing this overrides that and
@@ -89,6 +92,7 @@ shift
 
 CONFIG_OVERRIDE=""
 OUTPUT_DIR_OVERRIDE=""
+POLICY_CONFIG_OVERRIDE=""
 POLICY="CheatCodeMJ"
 ENABLE_RECORD=1
 DATASET_ROOT=""
@@ -118,6 +122,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)        CONFIG_OVERRIDE="$2"; shift 2 ;;
         --output-dir)    OUTPUT_DIR_OVERRIDE="$2"; shift 2 ;;
+        --policy-config) POLICY_CONFIG_OVERRIDE="$2"; shift 2 ;;
         --policy)        POLICY="$2"; shift 2 ;;
         --no-record)     ENABLE_RECORD=0; shift ;;
         --dataset-root)  DATASET_ROOT="$2"; DATASET_ROOT_USER_SET=1; shift 2 ;;
@@ -356,7 +361,20 @@ fi
 # Build the ROS-args parameter list, including any policy-specific overrides
 # (only emit -p flags when the user explicitly set them, so the policy's
 # declared defaults are otherwise used).
+# Bundled per-policy YAML defaults. ROS2 reads --params-file FIRST, then
+# applies any -p name:=value overrides on top. So a user can drop in a
+# tweaked YAML via --policy-config or override individual knobs via the
+# existing --insertion-threshold / etc. flags.
+POLICY_CONFIG="$POLICY_CONFIG_OVERRIDE"
+if [[ -z "$POLICY_CONFIG" ]]; then
+    candidate="$SRC/aic_example_policies/config/${POLICY,,}.yaml"
+    [[ -f "$candidate" ]] && POLICY_CONFIG="$candidate"
+fi
 POLICY_ARGS=( -p use_sim_time:=true -p policy:="aic_example_policies.ros.$POLICY" )
+if [[ -n "$POLICY_CONFIG" ]]; then
+    echo "policy params:  $POLICY_CONFIG"
+    POLICY_ARGS=( --params-file "$POLICY_CONFIG" "${POLICY_ARGS[@]}" )
+fi
 if [[ -n "$INSERTION_THRESHOLD" ]]; then
     POLICY_ARGS+=( -p insertion_threshold_m:=$INSERTION_THRESHOLD )
 fi
