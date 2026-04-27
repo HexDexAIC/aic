@@ -218,17 +218,24 @@ if ! docker inspect aic_eval --format '{{.State.Running}}' 2>/dev/null | grep -q
     exit 1
 fi
 
-# Stale process cleanup (mirrors run_scoring_loop.sh's logic).
-STALE_PATTERN='aic_example_policies|/aic_model/aic_model|ros2 run aic_model|record_lerobot'
+# Stale process cleanup. Two patterns:
+#   STALE_PATTERN_STARTUP — wider; used at the start of a run to kill
+#     any leftover policy/recorder from a previous invocation.
+#   STALE_PATTERN_POLICY  — used post-trial to kill the policy only.
+#     The recorder must NOT be in this list — it needs the full
+#     SAVE_GRACE window to finish encoding + saving the episode. The
+#     recorder exits on its own when STATUS_SUCCEEDED/ABORTED fires.
+STALE_PATTERN_STARTUP='aic_example_policies|/aic_model/aic_model|ros2 run aic_model|record_lerobot'
+STALE_PATTERN_POLICY='aic_example_policies|/aic_model/aic_model|ros2 run aic_model'
 
 kill_policy_on_host() {
-    if ! pgrep -f "$STALE_PATTERN" > /dev/null 2>&1; then return 0; fi
-    pkill -TERM -f "$STALE_PATTERN" 2>/dev/null || true
+    if ! pgrep -f "$STALE_PATTERN_POLICY" > /dev/null 2>&1; then return 0; fi
+    pkill -TERM -f "$STALE_PATTERN_POLICY" 2>/dev/null || true
     for _ in 1 2 3; do
         sleep 1
-        pgrep -f "$STALE_PATTERN" > /dev/null 2>&1 || return 0
+        pgrep -f "$STALE_PATTERN_POLICY" > /dev/null 2>&1 || return 0
     done
-    pkill -KILL -f "$STALE_PATTERN" 2>/dev/null || true
+    pkill -KILL -f "$STALE_PATTERN_POLICY" 2>/dev/null || true
     sleep 1
 }
 
@@ -267,9 +274,12 @@ cleanup_container() {
     pkill -9 -f "aic_example_policies|/aic_model/aic_model|ros2 run aic_model|gz sim -g" 2>/dev/null || true
 }
 
-if pgrep -f "$STALE_PATTERN" > /dev/null 2>&1; then
+if pgrep -f "$STALE_PATTERN_STARTUP" > /dev/null 2>&1; then
     echo "Killing stale processes from a previous run..."
-    kill_policy_on_host || true
+    pkill -TERM -f "$STALE_PATTERN_STARTUP" 2>/dev/null || true
+    sleep 2
+    pkill -KILL -f "$STALE_PATTERN_STARTUP" 2>/dev/null || true
+    sleep 1
 fi
 echo "Purging container-side stragglers..."
 cleanup_container
