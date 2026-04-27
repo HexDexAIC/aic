@@ -5,8 +5,10 @@ Use this for sweeps that already write to a shared dataset
 (<sweep>/dataset/) — no consolidation needed. For old sweeps with
 per-seed datasets, use consolidate_and_push.py instead.
 
-Auth (one-time):
-    huggingface-cli login              # or `hf auth login`
+Auth (one-time, via the pixi env's HF CLI):
+    pixi run --manifest-path src/aic/pixi.toml hf auth login
+    # paste a token with write scope from
+    # https://huggingface.co/settings/tokens
 
 Usage:
     pixi run --manifest-path src/aic/pixi.toml \\

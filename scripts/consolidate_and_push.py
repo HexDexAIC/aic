@@ -11,8 +11,8 @@ appended in seed order. Videos are re-encoded as part of save_episode
 (LeRobot v3.0 stores one MP4 per chunk-file, not per-episode, so a
 file-level merge is more pain than a clean re-write).
 
-Auth (one-time):
-    huggingface-cli login                # or `hf auth login` if you have the new CLI
+Auth (one-time, via the pixi env's HF CLI):
+    pixi run --manifest-path src/aic/pixi.toml hf auth login
 
 Usage (pixi env — has lerobot):
     pixi run --manifest-path src/aic/pixi.toml \\
