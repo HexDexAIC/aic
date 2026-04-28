@@ -38,7 +38,11 @@ class CheatCode(Policy):
     def __init__(self, parent_node):
         self._tip_x_error_integrator = 0.0
         self._tip_y_error_integrator = 0.0
+        # Defaults; CheatCodeMJ overrides these from ROS params (which load
+        # from aic_example_policies/config/cheatcodemj.yaml). Anyone
+        # subclassing CheatCode directly inherits these literals.
         self._max_integrator_windup = 0.05
+        self._xy_integrator_gain = 0.15
         self._task = None
         super().__init__(parent_node)
 
@@ -158,10 +162,8 @@ class CheatCode(Policy):
             f"pfrac: {position_fraction:.3} xy_error: {tip_x_error:0.3} {tip_y_error:0.3}   integrators: {self._tip_x_error_integrator:.3} , {self._tip_y_error_integrator:.3}"
         )
 
-        i_gain = 0.15
-
-        target_x = port_xy[0] + i_gain * self._tip_x_error_integrator
-        target_y = port_xy[1] + i_gain * self._tip_y_error_integrator
+        target_x = port_xy[0] + self._xy_integrator_gain * self._tip_x_error_integrator
+        target_y = port_xy[1] + self._xy_integrator_gain * self._tip_y_error_integrator
         target_z = port_transform.translation.z + z_offset - plug_tip_gripper_offset[2]
 
         blend_xyz = (
