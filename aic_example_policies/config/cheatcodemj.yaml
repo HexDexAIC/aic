@@ -30,7 +30,7 @@
     # ────────── hover height above port (per plug type) ────────────────
     # SFP needs 20 cm to clear NIC card body.
     # SC ports are board-flush — 12 cm is enough and lets integrator settle less.
-    approach_z_offset_sfp: 0.18
+    approach_z_offset_sfp: 0.20
     approach_z_offset_sc: 0.12
 
     # ────────── insertion + settle ─────────────────────────────────────
@@ -80,8 +80,8 @@
     # response so the integrator's commands cause less overshoot) and/or
     # raise XY damping (resists fast lateral velocity changes). Keep Kz
     # high enough to descend reliably. A reasonable first try:
-    #   descent_stiffness: [60.0, 60.0, 90.0, 50.0, 50.0, 50.0]
-    #   descent_damping:   [55.0, 55.0, 50.0, 20.0, 20.0, 20.0]
+    #   descent_stiffness: [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
+    #   descent_damping:   [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
     descent_stiffness: [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
     descent_damping:   [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
 
