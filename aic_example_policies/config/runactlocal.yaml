@@ -1,0 +1,29 @@
+# RunACTLocal tuning knobs.
+#
+# Loaded by run_scoring_loop.sh / record_episode.sh via
+# `ros2 run aic_model aic_model --params-file <this path>`. ROS2 reads
+# the YAML first, then applies any -p name:=value overrides on top.
+#
+# Units: stiffness = N/m (linear) or N·m/rad (rotational).
+
+/**:
+  ros__parameters:
+    # ────────── checkpoint location ─────────────────────────────────────
+    # Set ONE of these:
+    #   checkpoint_path = absolute path to a `pretrained_model/` dir
+    #   repo_id         = HF repo id (used only if checkpoint_path is empty)
+    # The local-path form is the preferred dev loop; HF form is for shared eval.
+    checkpoint_path: "/home/hariharan/ws_aic/aic_results/act-baseline-v1/checkpoints/040000/pretrained_model"
+    repo_id: "HexDexAIC/act-aic-sfp-500-v1"
+
+    # ────────── execution rate + timeout ────────────────────────────────
+    control_rate_hz: 25.0     # matches CheatCodeMJ's publish rate (training data cadence)
+    episode_timeout_s: 30.0   # max wall seconds inside one insert_cable call
+
+    # ────────── impedance ───────────────────────────────────────────────
+    # Stock ACT does NOT predict stiffness — the action.stiffness_diag feature
+    # in the dataset was never learned. We publish these fixed defaults at
+    # every step. Defaults match Policy.set_pose_target — the impedance the
+    # CheatCodeMJ training data was collected under.
+    stiffness: [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
+    damping:   [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]

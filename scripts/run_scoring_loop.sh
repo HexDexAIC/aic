@@ -14,6 +14,8 @@
 #   --ready-wait SEC        How long to wait for engine to advertise before starting policy. Default: 90.
 #   --no-pkill              Skip post-run pkill cleanup (leaves stragglers for debugging).
 #   --no-bag                Delete per-trial bag_trial_* dirs after scoring.yaml is written (disk saver).
+#   --policy-config PATH    YAML param file passed as --params-file to aic_model.
+#                           Auto-discovers aic_example_policies/config/<lower-policy>.yaml if unset.
 #
 # Layout produced:
 #   <OUTPUT_DIR>/
@@ -45,18 +47,20 @@ DO_PKILL=true
 GAZEBO_GUI=true
 LAUNCH_RVIZ=true
 NO_BAG=false
+POLICY_CONFIG_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --ground-truth) GROUND_TRUTH=true; shift ;;
-        --output-dir)   OUTPUT_BASE="$2"; shift 2 ;;
-        --timeout)      RUN_TIMEOUT="$2"; shift 2 ;;
-        --ready-wait)   READY_WAIT="$2"; shift 2 ;;
-        --no-pkill)     DO_PKILL=false; shift ;;
-        --no-bag)       NO_BAG=true; shift ;;
-        --no-gui)       GAZEBO_GUI=false; shift ;;
-        --no-rviz)      LAUNCH_RVIZ=false; shift ;;
-        --headless)     GAZEBO_GUI=false; LAUNCH_RVIZ=false; shift ;;
+        --ground-truth)  GROUND_TRUTH=true; shift ;;
+        --output-dir)    OUTPUT_BASE="$2"; shift 2 ;;
+        --timeout)       RUN_TIMEOUT="$2"; shift 2 ;;
+        --ready-wait)    READY_WAIT="$2"; shift 2 ;;
+        --no-pkill)      DO_PKILL=false; shift ;;
+        --no-bag)        NO_BAG=true; shift ;;
+        --no-gui)        GAZEBO_GUI=false; shift ;;
+        --no-rviz)       LAUNCH_RVIZ=false; shift ;;
+        --headless)      GAZEBO_GUI=false; LAUNCH_RVIZ=false; shift ;;
+        --policy-config) POLICY_CONFIG_OVERRIDE="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -267,11 +271,22 @@ for i in $(seq 1 "$N"); do
     fi
 
     # Terminal 2 — policy in pixi.
+    # Resolve per-policy YAML: explicit override beats convention. Convention
+    # is config/<lowercase-policy>.yaml under aic_example_policies. Same auto-
+    # discovery rule as record_episode.sh.
+    POLICY_CONFIG="$POLICY_CONFIG_OVERRIDE"
+    if [[ -z "$POLICY_CONFIG" ]]; then
+        candidate="$SRC/aic_example_policies/config/${POLICY,,}.yaml"
+        [[ -f "$candidate" ]] && POLICY_CONFIG="$candidate"
+    fi
+    POLICY_ARGS=( -p use_sim_time:=true -p policy:="aic_example_policies.ros.$POLICY" )
+    if [[ -n "$POLICY_CONFIG" ]]; then
+        POLICY_ARGS=( --params-file "$POLICY_CONFIG" "${POLICY_ARGS[@]}" )
+        echo "│  policy params: $POLICY_CONFIG"
+    fi
     (
         cd "$SRC"
-        exec pixi run ros2 run aic_model aic_model --ros-args \
-            -p use_sim_time:=true \
-            -p policy:="aic_example_policies.ros.$POLICY"
+        exec pixi run ros2 run aic_model aic_model --ros-args "${POLICY_ARGS[@]}"
     ) > "$T2_LOG" 2>&1 &
     T2_PID=$!
 
