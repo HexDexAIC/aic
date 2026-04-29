@@ -333,6 +333,13 @@ def main() -> int:
     p.add_argument("--sweep-dir", type=Path, default=None,
                    help="Reuse an existing sweep_dir (for resume / batching). "
                         "Default: new TS dir.")
+    p.add_argument("--only-seeds", type=str, default=None,
+                   help="Comma-separated seed list (e.g. '15,18,61,75'). "
+                        "Skips any seed not in the list. Useful for "
+                        "re-collecting specific failed/retry-success episodes "
+                        "from a prior sweep. Specs are still drawn from the "
+                        "same global --n / --seed plan, so the spawn config "
+                        "is bit-identical to the original run.")
     args = p.parse_args()
 
     ws = args.ws
@@ -382,12 +389,20 @@ def main() -> int:
     seeds_in_this_batch: set[int] = set()
     results: list[dict] = list(prior_results)
 
+    only_seeds: set[int] | None = None
+    if args.only_seeds:
+        only_seeds = {int(s) for s in args.only_seeds.split(",") if s.strip()}
+        print(f"  --only-seeds active: running {len(only_seeds)} seeds "
+              f"({sorted(only_seeds)})", flush=True)
+
     for spec in specs:
         seed = spec["seed"]
         if seed < args.start_from:
             continue
         if args.stop_at is not None and seed >= args.stop_at:
             break
+        if only_seeds is not None and seed not in only_seeds:
+            continue
         cfg = templated_config(base_yaml, spec)
         cfg_path = sweep_dir / "configs" / f"seed_{seed:02d}.yaml"
         cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
