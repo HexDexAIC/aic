@@ -174,11 +174,14 @@ class SimpleNormalizer:
         out = dict(batch)
         for k in self.image_keys:
             if k in batch:
-                # Images are uint8 [0, 255] from the dataloader. Convert to
-                # float [0, 1] then ImageNet-normalize.
+                # lerobot's video backend returns float32 in [0, 1]. If
+                # for any reason we get uint8 [0, 255] (e.g. PNG-per-frame
+                # path), divide by 255 first.
                 x = batch[k].to(self.device, non_blocking=True)
                 if x.dtype == torch.uint8:
                     x = x.float() / 255.0
+                elif x.dtype != torch.float32:
+                    x = x.float()
                 out[k] = (x - self._mean) / self._std
         return out
 
@@ -197,8 +200,12 @@ def main():
     # ── dataset ───────────────────────────────────────────────────
     print(f"[{time.strftime('%H:%M:%S')}] loading dataset {args.repo_id}", flush=True)
     eps = read_episodes(args.episodes_file)
+    # `revision="main"` is required for newly-pushed datasets that don't
+    # yet have a v3.0 tag — lerobot otherwise probes for the tag and
+    # raises a not-very-clear error.
     dataset = LeRobotDataset(
         repo_id=args.repo_id,
+        revision="main",
         episodes=eps,
         delta_timestamps={"action": [i / 20.0 for i in range(args.chunk_size)]},
     )
@@ -336,9 +343,20 @@ def main():
 
         if step % args.save_freq == 0 or step == args.steps:
             ckpt_dir = out_dir / "checkpoints" / f"{step:06d}"
-            (ckpt_dir / "pretrained_model").mkdir(parents=True, exist_ok=True)
+            pm_dir = ckpt_dir / "pretrained_model"
+            pm_dir.mkdir(parents=True, exist_ok=True)
             (ckpt_dir / "training_state").mkdir(parents=True, exist_ok=True)
-            policy.save_pretrained(ckpt_dir / "pretrained_model")
+            policy.save_pretrained(pm_dir)
+            # Also drop a stats.json next to the model so RunACTPR can
+            # un-normalize at deploy time without round-tripping through
+            # the dataset.
+            (pm_dir / "stats.json").write_text(
+                json.dumps(
+                    {k: {n: v.tolist() for n, v in st.items()}
+                     for k, st in stats.items()},
+                    indent=2,
+                )
+            )
             torch.save(
                 {
                     "step": step,

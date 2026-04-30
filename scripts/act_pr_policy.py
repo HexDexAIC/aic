@@ -39,6 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.act.modeling_act import ACT, ACTPolicy
@@ -46,6 +47,7 @@ from lerobot.policies.act.modeling_act import ACT, ACTPolicy
 PORT_POSE_KEY = "observation.port_pose_gt"
 
 
+@PreTrainedConfig.register_subclass("act_pr")
 @dataclass
 class ACTPRConfig(ACTConfig):
     """Same config space as ACTConfig, with the auxiliary loss weight added.
