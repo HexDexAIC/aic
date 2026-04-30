@@ -1,0 +1,27 @@
+# RunACTPR tuning knobs.
+#
+# Loaded by run_scoring_loop.sh / record_episode.sh via auto-discovery
+# (config/runactpr.yaml). ROS2 reads YAML first, then -p overrides.
+
+/**:
+  ros__parameters:
+    # ────────── checkpoint ──────────────────────────────────────────────
+    checkpoint_path: "/home/hariharan/ws_aic/aic_results/act-pr-v1/checkpoints/last/pretrained_model"
+    repo_id: "HexDexAIC/act-pr-aic-sfp-500-v1"
+
+    # ────────── execution ───────────────────────────────────────────────
+    control_rate_hz: 25.0
+    episode_timeout_s: 30.0
+
+    # ────────── impedance ──────────────────────────────────────────────
+    stiffness: [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
+    damping:   [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
+
+    # ────────── safety guard (Phase 5 plan) ────────────────────────────
+    # If predicted port pose flickers and the composed target jumps
+    # laterally by more than this distance in one tick, clamp the lateral
+    # delta to this magnitude. Z is unrestricted. Set to 0 to disable.
+    # Empirical guidance from ChatGPT's plan: 2-3 cm. We start a bit looser
+    # (5 cm) and tighten if guard activations during normal descent are too
+    # frequent.
+    lateral_jump_limit_m: 0.05
