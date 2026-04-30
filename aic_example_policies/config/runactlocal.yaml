@@ -13,7 +13,7 @@
     #   checkpoint_path = absolute path to a `pretrained_model/` dir
     #   repo_id         = HF repo id (used only if checkpoint_path is empty)
     # The local-path form is the preferred dev loop; HF form is for shared eval.
-    checkpoint_path: "/home/hariharan/ws_aic/aic_results/act-baseline-v1/checkpoints/040000/pretrained_model"
+    checkpoint_path: "/home/hariharan/ws_aic/aic_results/act-baseline-v1/checkpoints/080000/pretrained_model"
     repo_id: "HexDexAIC/act-aic-sfp-500-v1"
 
     # ────────── execution rate + timeout ────────────────────────────────
@@ -27,3 +27,34 @@
     # CheatCodeMJ training data was collected under.
     stiffness: [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
     damping:   [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
+
+    # ────────── inference cadence override ──────────────────────────────
+    # The trained ACT has chunk_size=100 and n_action_steps=100 — i.e. the
+    # policy plays a 100-step (4 s @ 25 Hz) chunk before re-inferring. That
+    # is effectively *open-loop* between inferences. Two ways to close the
+    # loop:
+    #
+    #   temporal_ensemble_coeff (paper's recipe) — re-infer every tick AND
+    #   keep a sliding window of overlapping chunks, weight-averaged with
+    #   exp(-coeff * i). 0.01 is the original ACT default. Smooths the
+    #   noisy first-action of each chunk. Mutually exclusive with
+    #   n_action_steps (this wins). Set < 0 to disable.
+    #
+    #   n_action_steps — bare chunk shortening with no ensembling. 1 = true
+    #   25 Hz, 0 = no override. Note: bare n=1 throws away ACT's
+    #   chunk-averaging and typically scores worse than n=100.
+    #
+    # Empirically (see [[runact-mean-trajectory-failure]]): neither knob
+    # moves the score meaningfully on the 80k checkpoint — the dominant
+    # failure mode is a structural one (visual shortcut + chunk-anchored
+    # mean trajectory), not an inference-cadence one.
+    temporal_ensemble_coeff: -1.0
+    n_action_steps: 0
+
+    # ────────── diagnostic: blank images ────────────────────────────────
+    # Replaces normalized image tensors with zeros at inference time, killing
+    # all visual signal while leaving proprio intact. Diagnostic only —
+    # never run with this true outside of a "is vision contributing"
+    # ablation. See [[runact-mean-trajectory-failure]] for the result of
+    # the original ablation against the 80k checkpoint.
+    blank_images: false

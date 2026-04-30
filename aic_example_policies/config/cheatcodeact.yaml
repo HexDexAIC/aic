@@ -1,0 +1,49 @@
+# CheatCodeACT — diagnostic hybrid: CheatCodeMJ approach + locally-trained
+# ACT descent. Inherits ALL of CheatCodeMJ's params (so we can tune the
+# approach exactly the same way), plus ACT-specific knobs prefixed `act_`.
+
+/**:
+  ros__parameters:
+    # ────────── inherited CheatCodeMJ params ───────────────────────────
+    # Same as cheatcodemj.yaml. Values match the canonical settings the
+    # 488-episode dataset was collected under.
+    insertion_threshold_m: 0.005
+    max_insertion_retries: 0      # ACT handles descent — no retries
+    descent_time_sfp: 12.0        # unused (descent is ACT-driven)
+    descent_time_sc: 12.0
+    approach_time_sfp: 6.0
+    approach_time_sc: 4.0
+    approach_z_offset_sfp: 0.20
+    approach_z_offset_sc: 0.12
+    insertion_depth: 0.015
+    settle_time_sfp: 1.0
+    settle_time_sc: 2.0
+    control_rate_hz: 25.0
+    lift_time_frac: 0.5
+    hover_hold_s: 0.5
+    xy_integrator_gain: 0.15
+    xy_integrator_max_windup: 0.05
+    stuck_min_fraction: 0.2
+    stuck_window_s: 1.0
+    stuck_progress_m: 0.002
+    bad_port_offset_x: 0.0
+    bad_port_offset_y: 0.0
+    bad_offset_decay_per_retry: 1.0
+
+    # CheatCodeMJ uses these for descent stiffness — unused here since we
+    # hand off to ACT after approach. Kept for super().__init__ to parse.
+    descent_stiffness: [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
+    descent_damping:   [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
+    release_stiffness: [75.0, 75.0, 75.0, 75.0, 75.0, 75.0]
+    release_damping:   [35.0, 35.0, 35.0, 35.0, 35.0, 35.0]
+
+    # ────────── ACT-side params (prefixed act_) ────────────────────────
+    checkpoint_path: "/home/hariharan/ws_aic/aic_results/act-baseline-v1/checkpoints/080000/pretrained_model"
+    repo_id: "HexDexAIC/act-aic-sfp-500-v1"
+
+    act_control_rate_hz: 25.0
+    act_episode_timeout_s: 20.0   # descent-only — shorter than RunACTLocal's 30s
+    act_stiffness: [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
+    act_damping:   [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
+    act_n_action_steps: 0
+    act_temporal_ensemble_coeff: -1.0

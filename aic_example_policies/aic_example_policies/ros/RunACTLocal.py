@@ -34,6 +34,24 @@ Configuration via ROS params (set via --params-file or -p):
   episode_timeout_s   max seconds inside one insert_cable() call (default 30.0)
   stiffness           6-vec stiffness diag (default Policy.set_pose_target defaults)
   damping             6-vec damping diag (default Policy.set_pose_target defaults)
+  n_action_steps      override the trained config's n_action_steps. The trained
+                      ACT runs at chunk_size=100 / n_action_steps=100 — i.e.
+                      *open-loop for 4 s* between inferences. Setting this to 1
+                      forces re-inference every tick (true 25 Hz feedback);
+                      4 → 6.25 Hz; 0 (default) → keep the trained value.
+                      Closes the BC covariate-shift loop without retraining.
+                      WARNING: bare n=1 throws away ACT's chunk-averaging and
+                      typically scores WORSE than n=100 (the first action of
+                      each chunk is the noisiest). Pair with
+                      temporal_ensemble_coeff for the paper's recipe.
+  temporal_ensemble_coeff
+                      enables ACT's temporal ensembler. Re-infers at every
+                      tick (forces n_action_steps = chunk_size = 100 internally),
+                      keeps a sliding window of overlapping chunks, and
+                      weight-averages them with weights w_i = exp(-coeff * i).
+                      0.01 is the paper's default. Set <0 (default) to leave
+                      `null` — i.e. ensembler disabled. Mutually exclusive
+                      with the n_action_steps override (this wins).
 """
 
 from __future__ import annotations
@@ -111,6 +129,13 @@ class RunACTLocal(Policy):
             list(_p("damping", [50.0, 50.0, 50.0, 20.0, 20.0, 20.0])),
             dtype=np.float32,
         )
+        self._n_action_steps_override = int(_p("n_action_steps", 0))
+        self._temporal_ensemble_coeff = float(_p("temporal_ensemble_coeff", -1.0))
+        # Diagnostic: replace the normalized image tensor with zeros before
+        # passing to the policy. This kills all visual information while
+        # leaving proprio intact. If the resulting trial score matches the
+        # natural-image baseline within noise, vision is being ignored.
+        self._blank_images = bool(_p("blank_images", False))
 
         if ckpt:
             policy_path = Path(ckpt).expanduser().resolve()
@@ -138,12 +163,43 @@ class RunACTLocal(Policy):
         with open(policy_path / "config.json") as f:
             cfg_dict = json.load(f)
         cfg_dict.pop("type", None)  # draccus chokes on this hint field
+
+        # Temporal ensembler must be set BEFORE ACTPolicy() because the policy
+        # constructs the ensembler in __init__ based on this flag. It does NOT
+        # affect the trained weights — it's an inference-time post-processor
+        # that overlaps chunk predictions and weight-averages them.
+        # ACTConfig validates n_action_steps == 1 when ensembler is on, so
+        # we must set both at construction time (overriding the saved 100).
+        if self._temporal_ensemble_coeff >= 0.0:
+            cfg_dict["temporal_ensemble_coeff"] = self._temporal_ensemble_coeff
+            cfg_dict["n_action_steps"] = 1
+
         config = draccus.decode(ACTConfig, cfg_dict)
 
         self.policy = ACTPolicy(config)
-        self.policy.load_state_dict(load_file(policy_path / "model.safetensors"))
+        self.policy.load_state_dict(load_file(policy_path / "model.safetensors"), strict=False)
         self.policy.eval()
         self.policy.to(self.device)
+
+        # n_action_steps override (only applies if temporal ensembler is OFF;
+        # when ensembler is on, lerobot forces n_action_steps = chunk_size).
+        if self._temporal_ensemble_coeff < 0.0 and self._n_action_steps_override > 0:
+            old = self.policy.config.n_action_steps
+            self.policy.config.n_action_steps = self._n_action_steps_override
+            self.get_logger().info(
+                f"n_action_steps override: {old} → {self._n_action_steps_override} "
+                f"(re-infer every {self._n_action_steps_override / 25.0:.2f} s @ 25 Hz)"
+            )
+        if self._temporal_ensemble_coeff >= 0.0:
+            self.get_logger().info(
+                f"temporal_ensemble_coeff = {self._temporal_ensemble_coeff} "
+                f"(re-infer every tick, weighted-average over chunk_size=100 chunks)"
+            )
+        if self._blank_images:
+            self.get_logger().warn(
+                "blank_images = True — feeding zero tensors instead of camera "
+                "images. Diagnostic mode only."
+            )
 
         # ── normalizer stats (input side) ───────────────────────────────
         # safetensors keys follow `<feature_name>.<mean|std>` convention.
@@ -292,6 +348,9 @@ class RunACTLocal(Policy):
             )
             for view in ("left", "center", "right")
         }
+        if self._blank_images:
+            for k in list(out.keys()):
+                out[k] = torch.zeros_like(out[k])
         state_np = self._build_state(obs_msg)
         state = torch.from_numpy(state_np).float().unsqueeze(0).to(self.device)
         out["observation.state"] = (state - self._state_mean) / self._state_std
