@@ -49,10 +49,19 @@ from aic_example_policies.perception.port_pose_v2.tracker import (
 )
 
 
-# Empirical visible-mouth → port_link offset in port_link frame.
-# We add +0.0037 m to the *visible mouth* z to land on port_link z.
-# Equivalently in the mouth frame, port_link is at +0.0421 m in mouth z.
-VISIBLE_MOUTH_TO_PORT_LINK_DZ = +0.0037  # meters, in port_link frame
+# Empirical visible-mouth → port_link translation, in visible-mouth frame.
+# From estimate_mouth_calib.py (55 detections, 10 episodes):
+#     T_port_link → visible_mouth = (-0.78, +0.78, -42.08) mm in port_link frame.
+# Inverting: visible_mouth → port_link translation in *visible-mouth* frame is
+# (+0.78, -0.78, +42.08) mm. With visible mouth and port_link sharing
+# rotation, +Z is the same direction in both. So composing
+# T_base_port_link = T_base_visible @ Translation(0, 0, +0.04208) gives the
+# port_link pose CheatCodeMJ expects.
+#
+# Compare to SDF: model.sdf says entrance is offset (0, 0, -0.0458) from
+# port_link in port_link frame. The empirical -42.08 mm is 3.7 mm above
+# the SDF entrance — see aic_wiki/wiki/findings/yolo-pnp-pose-accuracy-offline.md.
+VISIBLE_MOUTH_TO_PORT_LINK_DZ = +0.04208  # meters, in visible_mouth frame
 
 
 WEIGHTS_PATH = Path(os.environ.get(
