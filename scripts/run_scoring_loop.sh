@@ -207,7 +207,26 @@ echo "Purging any container-side stragglers from prior runs..."
 cleanup_container
 sleep 2
 
-trap 'echo; echo "Interrupted. Cleaning up..."; kill_policy_on_host; cleanup_container; exit 130' INT TERM
+# INT/TERM handler. Order matters:
+#  1. Kill the local engine handle (T1_PID) so docker-exec/distrobox can release.
+#  2. Kill host-side policy procs.
+#  3. Cleanup container-side stragglers (engine/sim/etc).
+# Without (1) the local `docker exec` parent stays alive holding the TTY/pipe,
+# and the inner engine process keeps running because docker exec doesn't
+# forward SIGINT to grandchildren by default.
+on_interrupt() {
+    echo
+    echo "Interrupted. Cleaning up..."
+    if [[ -n "${T1_PID:-}" ]] && kill -0 "$T1_PID" 2>/dev/null; then
+        kill -INT  "$T1_PID" 2>/dev/null || true; sleep 1
+        kill -TERM "$T1_PID" 2>/dev/null || true; sleep 1
+        kill -KILL "$T1_PID" 2>/dev/null || true
+    fi
+    kill_policy_on_host
+    cleanup_container
+    exit 130
+}
+trap on_interrupt INT TERM
 
 for i in $(seq 1 "$N"); do
     RUN_ID="$(printf "run_%03d" "$i")"
@@ -222,13 +241,21 @@ for i in $(seq 1 "$N"); do
     # Terminal 1 — engine + sim in the container.
     # distrobox enter doesn't reliably forward env vars, so set AIC_RESULTS_DIR
     # explicitly inside the subshell it spawns.
+    #
+    # AIC_USE_DOCKER_EXEC=1 swaps `distrobox enter -r` for `docker exec`. The
+    # distrobox path needs sudo (rootful), which fails from non-TTY shells; the
+    # docker-exec path works headlessly. Same container either way.
+    ENGINE_CMD_SL="export AIC_RESULTS_DIR='$RUN_DIR' && exec /entrypoint.sh ground_truth:=$GROUND_TRUTH start_aic_engine:=true shutdown_on_aic_engine_exit:=true gazebo_gui:=$GAZEBO_GUI launch_rviz:=$LAUNCH_RVIZ"
     (
         # shutdown_on_aic_engine_exit defaults to false upstream — without it
         # the launch keeps gzserver/aic_adapter/rviz spinning long after the
         # engine has exited cleanly and scoring.yaml is written. Always true
         # for batch sweeps so the run terminates promptly.
-        distrobox enter -r aic_eval -- \
-            bash -c "export AIC_RESULTS_DIR='$RUN_DIR' && exec /entrypoint.sh ground_truth:=$GROUND_TRUTH start_aic_engine:=true shutdown_on_aic_engine_exit:=true gazebo_gui:=$GAZEBO_GUI launch_rviz:=$LAUNCH_RVIZ"
+        if [[ "${AIC_USE_DOCKER_EXEC:-0}" == "1" ]]; then
+            exec docker exec -i aic_eval bash -c "$ENGINE_CMD_SL"
+        else
+            exec distrobox enter -r aic_eval -- bash -c "$ENGINE_CMD_SL"
+        fi
     ) > "$T1_LOG" 2>&1 &
     T1_PID=$!
 

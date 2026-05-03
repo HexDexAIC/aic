@@ -274,6 +274,28 @@ cleanup_container() {
     pkill -9 -f "aic_example_policies|/aic_model/aic_model|ros2 run aic_model|gz sim -g" 2>/dev/null || true
 }
 
+# INT/TERM handler. docker exec / distrobox enter don't forward SIGINT to
+# grandchildren reliably, so on Ctrl-C we have to kill T1_PID (engine
+# launcher) and T2_PID (policy launcher) explicitly, then sweep the
+# container for stragglers. Without this the engine + sim keep running
+# after the user pressed Ctrl-C.
+on_interrupt() {
+    echo
+    echo "Interrupted. Cleaning up..."
+    if [[ -n "${T2_PID:-}" ]] && kill -0 "$T2_PID" 2>/dev/null; then
+        kill -INT  "$T2_PID" 2>/dev/null || true; sleep 1
+        kill -KILL "$T2_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${T1_PID:-}" ]] && kill -0 "$T1_PID" 2>/dev/null; then
+        kill -INT  "$T1_PID" 2>/dev/null || true; sleep 1
+        kill -TERM "$T1_PID" 2>/dev/null || true; sleep 1
+        kill -KILL "$T1_PID" 2>/dev/null || true
+    fi
+    cleanup_container
+    exit 130
+}
+trap on_interrupt INT TERM
+
 if pgrep -f "$STALE_PATTERN_STARTUP" > /dev/null 2>&1; then
     echo "Killing stale processes from a previous run..."
     pkill -TERM -f "$STALE_PATTERN_STARTUP" 2>/dev/null || true
