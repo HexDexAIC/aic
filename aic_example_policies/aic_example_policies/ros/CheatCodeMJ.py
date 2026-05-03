@@ -385,6 +385,26 @@ class CheatCodeMJ(CheatCode):
             target_frame, source_frame, Time()
         ).transform
 
+    # ------------------------------------------------------------------
+    # Port-pose source — overridable for vision subclasses
+    # ------------------------------------------------------------------
+    def _get_port_pose(self, task, get_observation=None):
+        """Return current port pose (geometry_msgs/Transform in base_link).
+
+        Default: TF lookup of `task_board/<module>/<port>_link`. Requires
+        `ground_truth:=true`. Subclasses (e.g. CheatCodeMJVision) may override
+        this to use a vision pipeline, returning the same Transform type.
+
+        `get_observation` is the per-trial callback (passed by insert_cable);
+        the TF default ignores it, but vision subclasses use it to fetch
+        camera frames. Raises tf2_ros.TransformException on failure.
+        """
+        from rclpy.time import Time
+        port_frame = f"task_board/{task.target_module_name}/{task.port_name}_link"
+        return self._parent_node._tf_buffer.lookup_transform(
+            "base_link", port_frame, Time()
+        ).transform
+
     def _publish_release_hold(self, move_robot: MoveRobotCallback) -> None:
         try:
             tcp = self._lookup("base_link", "gripper/tcp")
@@ -435,9 +455,7 @@ class CheatCodeMJ(CheatCode):
                 return False
 
         try:
-            port_tf = self._parent_node._tf_buffer.lookup_transform(
-                "base_link", port_frame, Time()
-            ).transform
+            port_tf = self._get_port_pose(task, get_observation=get_observation)
         except TransformException as ex:
             self.get_logger().error(f"Could not look up port transform: {ex}")
             if summary: summary.close()
@@ -542,9 +560,7 @@ class CheatCodeMJ(CheatCode):
         # Re-lookup port_tf after hover settles. Approach-time snapshot may be
         # stale vs current TF state; descent uses live port pose.
         try:
-            port_tf = self._parent_node._tf_buffer.lookup_transform(
-                "base_link", port_frame, Time()
-            ).transform
+            port_tf = self._get_port_pose(task, get_observation=get_observation)
             self._apply_bad_offset(port_tf)
             port_xyz = (
                 port_tf.translation.x, port_tf.translation.y, port_tf.translation.z,
@@ -635,9 +651,7 @@ class CheatCodeMJ(CheatCode):
 
                 # Re-snapshot port_tf — the live TF may have drifted between attempts.
                 try:
-                    port_tf = self._parent_node._tf_buffer.lookup_transform(
-                        "base_link", port_frame, Time()
-                    ).transform
+                    port_tf = self._get_port_pose(task, get_observation=get_observation)
                     # Pass attempt so bad-offset decays across retries.
                     self._apply_bad_offset(port_tf, attempt=attempt)
                     port_xyz = (
