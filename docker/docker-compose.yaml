@@ -7,12 +7,42 @@ services:
       dockerfile: docker/aic_eval/Dockerfile
       context: ..
     command: gazebo_gui:=false launch_rviz:=false ground_truth:=false start_aic_engine:=true shutdown_on_aic_engine_exit:=true model_discovery_timeout_seconds:=600
-    gpus: all
+    # `gpus: all` only exposes compute, not graphics. Without graphics +
+    # a display context, Ogre2 falls back to software rendering for the
+    # wrist cameras → CPU-bound at ~1/55× real-time. Two changes vs the
+    # default to enable headless GPU rendering:
+    #   1. NVIDIA_DRIVER_CAPABILITIES=all (graphics + compute + display)
+    #   2. Bind /dev/dri (DRM nodes) + the host X socket so Ogre2 picks up
+    #      a hardware EGL context. Same trick distrobox uses by default.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, graphics, compute, utility, display]
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      # NVIDIA Container Runtime *should* inject this when `graphics`
+      # capability is requested, but on this host it doesn't (only
+      # 50_mesa.json ends up in /usr/share/glvnd/egl_vendor.d/ inside).
+      # Without it, libEGL picks Mesa instead of NVIDIA → software
+      # rendering. Bind-mount the host's NVIDIA ICD as a workaround.
+      - /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro
     networks:
       - default
     environment:
       AIC_EVAL_PASSWD: CHANGE_IN_PROD
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      NVIDIA_DRIVER_CAPABILITIES: all
+      NVIDIA_VISIBLE_DEVICES: all
+      # Force EGL to use NVIDIA's vendor library directly (skip GLVND
+      # auto-pick which falls through to Mesa). Without this, even with
+      # the 10_nvidia.json ICD bound in, EGL couldn't load the driver.
+      __EGL_VENDOR_LIBRARY_FILENAMES: /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+      __GLX_VENDOR_LIBRARY_NAME: nvidia
       # AIC_ENABLE_ACL: true
   model:
     image: runactlocal:v1
@@ -25,7 +55,13 @@ services:
         # additional_contexts (BuildKit feature) instead of moving it.
         # Override with: docker compose build --build-arg ... or by editing.
         - act_checkpoint=${ACT_CHECKPOINT_DIR:-${HOME}/ws_aic/aic_results/act-baseline-v1/checkpoints/080000/pretrained_model}
-    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
     networks:
       - default
     environment:
@@ -33,6 +69,8 @@ services:
       ZENOH_ROUTER_CHECK_ATTEMPTS: -1
       AIC_ROUTER_ADDR: eval:7447
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NVIDIA_VISIBLE_DEVICES: all
       # AIC_ENABLE_ACL: true
 networks:
   default:
