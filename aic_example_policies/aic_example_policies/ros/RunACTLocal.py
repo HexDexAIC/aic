@@ -140,9 +140,14 @@ class RunACTLocal(Policy):
         if ckpt:
             policy_path = Path(ckpt).expanduser().resolve()
             if not policy_path.is_dir():
-                raise FileNotFoundError(f"checkpoint_path not found: {policy_path}")
-            self.get_logger().info(f"Loading ACT from local: {policy_path}")
-        else:
+                self.get_logger().warn(
+                    f"checkpoint_path not found ({policy_path}) — falling back "
+                    f"to HF repo_id={repo}"
+                )
+                ckpt = ""
+            else:
+                self.get_logger().info(f"Loading ACT from local: {policy_path}")
+        if not ckpt:
             policy_path = Path(
                 snapshot_download(
                     repo_id=repo,
@@ -397,11 +402,24 @@ class RunACTLocal(Policy):
         self.policy.reset()  # clear ACT's internal action queue
         self.get_logger().info(f"RunACTLocal.insert_cable() enter. Task: {task}")
 
-        t0 = time.time()
+        # Use ROS sim time (use_sim_time:=true) so timing works correctly
+        # even when sim runs slower than real-time. With wall-time, if sim
+        # runs at 1/Nth real-time, publish rate is N× higher than intended,
+        # producing wildly excessive jerk (138 vs 5.57 m/s³) and the arm
+        # never reaches the port. Use the parent node's clock so policy
+        # keeps trained inference cadence in sim seconds.
+        clock = self._parent_node.get_clock()
+        t0_sim = clock.now().nanoseconds / 1e9
+        t0_wall = time.time()
         n_steps = 0
+        last_step_sim = t0_sim
 
-        while time.time() - t0 < self._episode_timeout:
-            loop_start = time.time()
+        while True:
+            now_sim = clock.now().nanoseconds / 1e9
+            if now_sim - t0_sim >= self._episode_timeout:
+                break
+
+            loop_start_sim = now_sim
 
             obs_msg = get_observation()
             if obs_msg is None:
@@ -418,15 +436,26 @@ class RunACTLocal(Policy):
             n_steps += 1
 
             if n_steps % 25 == 0:
-                send_feedback(f"step {n_steps} t={time.time() - t0:.1f}s")
+                send_feedback(
+                    f"step {n_steps} sim_t={now_sim - t0_sim:.1f}s "
+                    f"wall_t={time.time() - t0_wall:.1f}s"
+                )
 
-            elapsed = time.time() - loop_start
-            sleep_for = self._control_period - elapsed
-            if sleep_for > 0:
-                time.sleep(sleep_for)
+            # Sleep until the next sim-time tick. If sim runs faster than
+            # real-time, this falls through; if slower, we busy-wait
+            # comparing sim clock so we stay synced to sim cadence.
+            target_sim = loop_start_sim + self._control_period
+            while True:
+                cur_sim = clock.now().nanoseconds / 1e9
+                if cur_sim >= target_sim:
+                    break
+                # Sleep at most 1/2 control period; recheck sim clock often.
+                time.sleep(min(self._control_period * 0.5, max(0.0, target_sim - cur_sim)))
 
+        wall_elapsed = time.time() - t0_wall
+        sim_elapsed = clock.now().nanoseconds / 1e9 - t0_sim
         self.get_logger().info(
             f"RunACTLocal.insert_cable() exit after {n_steps} steps, "
-            f"{time.time() - t0:.2f}s wall."
+            f"{sim_elapsed:.2f}s sim ({wall_elapsed:.2f}s wall)."
         )
         return True

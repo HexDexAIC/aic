@@ -15,10 +15,16 @@ services:
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       # AIC_ENABLE_ACL: true
   model:
-    image: my-solution:v1
+    image: runactlocal:v1
     build:
-      dockerfile: docker/aic_model/Dockerfile
+      dockerfile: docker/runactlocal/Dockerfile
       context: ..
+      additional_contexts:
+        # Bake the local 80k ACT checkpoint into the image at build time.
+        # Path is on the host; not part of the source tree, so we use
+        # additional_contexts (BuildKit feature) instead of moving it.
+        # Override with: docker compose build --build-arg ... or by editing.
+        - act_checkpoint=${ACT_CHECKPOINT_DIR:-${HOME}/ws_aic/aic_results/act-baseline-v1/checkpoints/080000/pretrained_model}
     gpus: all
     networks:
       - default
