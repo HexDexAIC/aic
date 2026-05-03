@@ -14,14 +14,13 @@
 #   AIC_V1_WEIGHTS    Path to the trained YOLO best.pt. Default ~/aic_runs/
 #                     v1_h100_results/best.pt. Download from
 #                     https://huggingface.co/HexDexAIC/aic-port-yolo-v1
-#   IMAGE             Eval Docker image tag. Default aic_eval:fixed18_patched
-#                     (= aic_eval:fixed18 + a tiny patch the script applies
-#                     automatically on first run; see `ensure_patched_image`
-#                     below for what the patch does and why it's needed).
-#                     Override via `IMAGE=mytag ./run_...` if your team has
-#                     a different build.
-#   BASE_IMAGE        Source image for the auto-patch (default aic_eval:fixed18).
-#                     Override if your unpatched eval image has a different tag.
+#   IMAGE             Eval Docker image tag. Default
+#                     ghcr.io/intrinsic-dev/aic/aic_eval:latest (the
+#                     official upstream image — same one referenced in
+#                     the repo's docker/docker-compose.yaml). The script
+#                     pulls it automatically if not cached locally.
+#                     Override via `IMAGE=mytag ./run_...` if you've built
+#                     your own.
 #   SUDO_PW           Sudo password for `mount --make-rshared /` step.
 #                     Required only if you haven't already run that mount on
 #                     this host. Override via `SUDO_PW=xxx ./run_...`.
@@ -30,50 +29,28 @@
 set -e
 export PATH=$HOME/.pixi/bin:$PATH
 SUDO_PW=${SUDO_PW:-}
-IMAGE=${IMAGE:-aic_eval:fixed18_patched}
-BASE_IMAGE=${BASE_IMAGE:-aic_eval:fixed18}
+IMAGE=${IMAGE:-ghcr.io/intrinsic-dev/aic/aic_eval:latest}
 CONTAINER="aic_eval_vi_v3"
 RESULTS="$HOME/aic_results_visioninsert_v3"
 WEIGHTS=${AIC_V1_WEIGHTS:-$HOME/aic_runs/v1_h100_results/best.pt}
 WORKSPACE=${AIC_WORKSPACE:-$HOME/ws_aic/src/aic}
 
-# ─── auto-patch IMAGE if missing ──────────────────────────────────────────────
-# aic_eval:fixed18 (the public eval image) ships with two stale .pyc files
-# whose source size = 0 in the .pyc header (side-effect of an upstream
-# BuildKit cache bug). They contain a top-level
-# `raise RuntimeError("Could not find executable for 'gz'")` that fires the
-# moment ros_gz_sim is imported, so `start_aic_engine:=true` aborts the
-# launch graph before the engine ever starts. Running v3 against unpatched
-# fixed18 therefore yields zero insertions across all trials.
-#
-# The patch is just two `rm`s — Python recompiles from the (already-fixed)
-# .py source on next import. We materialise it as `aic_eval:fixed18_patched`
-# the first time this script runs, then reuse it on every subsequent run.
-ensure_patched_image() {
-    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-        return 0
-    fi
-    log "Patched image $IMAGE not found locally; building from $BASE_IMAGE..."
-    if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
-        log "ERROR: base image $BASE_IMAGE also not found. Pull it first:"
-        log "  docker pull $BASE_IMAGE   # (or load from your team's distribution)"
-        exit 1
-    fi
-    local tmp="aic_eval_patch_tmp_$$"
-    docker run -d --name "$tmp" --entrypoint sleep "$BASE_IMAGE" infinity >/dev/null
-    docker exec "$tmp" rm -f \
-        /opt/ros/kilted/lib/python3.12/site-packages/ros_gz_sim/launch/actions/__pycache__/gz_server.cpython-312.pyc \
-        /opt/ros/kilted/lib/python3.12/site-packages/ros_gz_sim/launch/actions/__pycache__/gz_client.cpython-312.pyc \
-        2>/dev/null || true
-    docker commit "$tmp" "$IMAGE" >/dev/null
-    docker rm -f "$tmp" >/dev/null
-    log "Built $IMAGE from $BASE_IMAGE (removed 2 stale gz_server/gz_client .pyc files)"
-}
-
 log() { echo -e "\e[1;34m[VisionInsert_v3]\e[0m $*"; }
 
-log "Step 0: ensure patched eval image exists ($IMAGE)"
-ensure_patched_image
+# ─── ensure IMAGE is available (pull if needed) ───────────────────────────────
+# The default IMAGE points at the upstream registry; pull on first run so
+# teammates don't need to pre-pull manually. If IMAGE is overridden to a
+# locally-built tag, this just becomes a no-op (docker pull errors on
+# unknown registries are tolerated).
+log "Step 0: ensure eval image is available ($IMAGE)"
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    log "Image not cached locally — pulling..."
+    docker pull "$IMAGE" || {
+        log "ERROR: could not pull $IMAGE. If you've built your own eval image,"
+        log "       set IMAGE=<your-tag> and re-run."
+        exit 1
+    }
+fi
 
 log "Step 1: cleanup any prior container/results + stale host-side aic_model procs"
 docker rm -f $CONTAINER 2>/dev/null || true
