@@ -1,0 +1,71 @@
+name: aic_v3
+services:
+  eval:
+    image: ghcr.io/intrinsic-dev/aic/aic_eval
+    build:
+      dockerfile: docker/aic_eval/Dockerfile
+      context: ..
+    command: gazebo_gui:=false launch_rviz:=false ground_truth:=false start_aic_engine:=true shutdown_on_aic_engine_exit:=true model_discovery_timeout_seconds:=600
+    # Same GPU-rendering fixes as docker-compose.yaml — see comments there.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, graphics, compute, utility, display]
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro
+    networks:
+      - default
+    environment:
+      AIC_EVAL_PASSWD: CHANGE_IN_PROD
+      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      NVIDIA_DRIVER_CAPABILITIES: all
+      NVIDIA_VISIBLE_DEVICES: all
+      __EGL_VENDOR_LIBRARY_FILENAMES: /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+      __GLX_VENDOR_LIBRARY_NAME: nvidia
+  model:
+    image: visioninsertv3:v1
+    build:
+      dockerfile: docker/visioninsertv3/Dockerfile
+      context: ..
+      additional_contexts:
+        # Bake the YOLO weights into the image at build time.
+        # Default points at /tmp/yolo_stage which holds the resolved (real-file)
+        # copy of best.pt — HF cache uses symlinks pointing outside the snapshot
+        # dir, which breaks Docker context. Stage with:
+        #   mkdir -p /tmp/yolo_stage
+        #   cp -L $HOME/.cache/huggingface/hub/models--HexDexAIC--aic-port-yolo-v1/snapshots/*/best.pt \
+        #         /tmp/yolo_stage/best.pt
+        # Override via YOLO_WEIGHTS_DIR=/some/dir/that/contains/best.pt
+        - yolo_weights=${YOLO_WEIGHTS_DIR:-/tmp/yolo_stage}
+        # Bake the per-host TCP→plug calibration. Default points at
+        # /tmp/tcp_to_plug_stage which must contain tcp_to_plug_offset.json.
+        # Stage with:
+        #   mkdir -p /tmp/tcp_to_plug_stage
+        #   cp ~/aic_logs/tcp_to_plug_offset.json /tmp/tcp_to_plug_stage/
+        # Override via TCP_TO_PLUG_DIR=/some/dir/that/contains/tcp_to_plug_offset.json
+        - tcp_to_plug_offset=${TCP_TO_PLUG_DIR:-/tmp/tcp_to_plug_stage}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+    networks:
+      - default
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ZENOH_ROUTER_CHECK_ATTEMPTS: -1
+      AIC_ROUTER_ADDR: eval:7447
+      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NVIDIA_VISIBLE_DEVICES: all
+networks:
+  default:
+    internal: true
