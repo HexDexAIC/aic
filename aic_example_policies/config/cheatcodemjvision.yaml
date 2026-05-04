@@ -13,13 +13,18 @@
   ros__parameters:
     # ────────── insertion success + retry ──────────────────────────────
     insertion_threshold_m: 0.005          # plug-port distance below which insertion is "seated"
-    max_insertion_retries: 2              # 1 initial attempt + N retries
+    # Push-through mode (matches VisionInsert_v3): commit a single descent
+    # with no early-abort on stuck. With vision pose at hover (~13mm bias),
+    # stuck-detect would lift back to hover and re-introduce that bias on
+    # every retry instead of using the close-range, sub-3mm pose available
+    # mid-descent. See [[cheatcodemj-vision-seed137-bottleneck]].
+    max_insertion_retries: 0              # 1 attempt total; no lift-back-to-hover
 
     # ────────── descent timing (per plug type) ─────────────────────────
     # min-jerk profile from APPROACH_Z_OFFSET → -INSERTION_DEPTH.
     # Slower descent = more integrator settling time + lower peak velocity.
     # SC's variance lives here, so we keep its descent slow.
-    descent_time_sfp: 12.0                # was 9.0 — slowed for cleaner training data
+    descent_time_sfp: 12.0                # min-jerk profile; faster (5s) didn't improve score
     descent_time_sc: 12.0
 
     # ────────── approach timing (per plug type) ────────────────────────
@@ -56,9 +61,13 @@
     # During descent, sample plug-port distance every tick. Once past
     # stuck_min_fraction of the descent, look at the recent stuck_window_s
     # of samples — if net distance change < stuck_progress_m, bail and retry.
-    stuck_min_fraction: 0.2
+    # stuck_min_fraction>1.0 disables stuck-detection entirely (the descent
+    # `if fraction > stuck_min_fraction` gate never enters since fraction
+    # tops out at 1.0). Lets the descent run the full duration regardless
+    # of plug-port progress — matches VisionInsert_v3's commit-and-push.
+    stuck_min_fraction: 2.0
     stuck_window_s: 1.0
-    stuck_progress_m: 0.002
+    stuck_progress_m: 0.0
 
     # ────────── deliberate-failure injection (testing only) ────────────
     # Add to port_tf before descent so the policy aims off-target. Real
