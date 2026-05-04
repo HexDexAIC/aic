@@ -66,12 +66,14 @@ if [[ ! -d "$WORKSPACE" ]]; then
 fi
 
 log "Step 5: start container (image=$IMAGE, ground_truth=false, start_aic_engine=true)"
+xhost +local: >/dev/null 2>&1 || true
 docker run -d --rm --name $CONTAINER --gpus all \
-    -e DISPLAY='' -e QT_QPA_PLATFORM=offscreen \
+    -e DISPLAY="$DISPLAY" \
+    -v /tmp/.X11-unix:/tmp/.X11-unix \
     --network bridge -p 7447:7447 \
     --privileged \
     "$IMAGE" \
-    'gazebo_gui:=false' 'launch_rviz:=false' \
+    'gazebo_gui:=false' 'launch_rviz:=true' \
     'start_aic_engine:=true' 'ground_truth:=false'
 
 log "Step 6: wait for engine ready"
