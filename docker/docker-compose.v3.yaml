@@ -66,6 +66,11 @@ services:
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       NVIDIA_VISIBLE_DEVICES: all
+      # Robustness/sweep knobs. Defaults match the source defaults; override
+      # from the host shell for A/B sweeps without rebuilding, e.g.
+      # `AIC_V3_DESCENT_EXTRA=0.020 docker compose up`.
+      AIC_V3_SETTLE_S: ${AIC_V3_SETTLE_S:-0.0}
+      AIC_V3_DESCENT_EXTRA: ${AIC_V3_DESCENT_EXTRA:-0.015}
 networks:
   default:
     internal: true

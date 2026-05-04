@@ -122,7 +122,19 @@ APPROACH_ITERS = 30          # was 100 in v2
 APPROACH_SLEEP = 0.15        # was 0.05  (sim seconds per step)
 DESCENT_ITERS  = 50          # was ~430 in v2
 DESCENT_SLEEP  = 0.10        # was 0.05
-DESCENT_Z_TOTAL = 0.215      # 0.2 (start z_offset) - (-0.015) (end)
+# Default descent: 20cm above port → 1.5cm + DESCENT_Z_EXTRA below port
+# mouth. The extra pushes the end-target deeper, making the controller
+# press harder at the bottom of descent. Doesn't unlock "full insertion"
+# (the plug doesn't actually move further than its mechanical seat) but
+# converts more shallower-partial endings (t2 ~46) into deeper-partial
+# (t2 ~66). 4×5 sweep over [0, 5, 10, 15] mm: 0/5/10mm essentially
+# identical (~118 mean), 15mm wins (~123); 10-run confirmation at 15mm:
+# mean 126.22, t2_high 6/10 (vs 4/10 at 0mm). Override via
+# AIC_V3_DESCENT_EXTRA env var (in metres). Set to 0 for the original
+# v3 behaviour.
+DESCENT_Z_BASE  = 0.215
+DESCENT_Z_EXTRA = float(os.environ.get("AIC_V3_DESCENT_EXTRA", "0.015"))
+DESCENT_Z_TOTAL = DESCENT_Z_BASE + DESCENT_Z_EXTRA
 DESCENT_Z_STEP = DESCENT_Z_TOTAL / DESCENT_ITERS   # ~0.0043m per step
 STABILIZE_SEC  = 5.0
 
@@ -331,12 +343,18 @@ class VisionInsert_v3(Policy):
         self._tcp_to_plug_T = _tf_dict_to_T(offset)
         self.get_logger().info(f"VisionInsert_v3: tcp_to_plug = {offset}")
 
-        # (Robustness 2) Settle delay before vision detection. Submission
-        # #660 trial-1 had a cable-spawn-retry that left only ~1.6s for the
-        # cable+plug to settle before the policy started detecting; YOLO/PnP
-        # on a swinging plug image gave no lock → return False → trial
-        # scored 1. 2 sim-sec is cheap insurance against that race.
-        self.sleep_for(2.0)
+        # (Robustness 2) Settle delay before vision detection. Insurance
+        # against a cable-spawn-retry leaving the plug swinging at policy
+        # start. 4×5 sweep over [0.0, 0.5, 1.0, 2.0]s showed ANY nonzero
+        # settle suppresses the trial-2 high-bracket (54.75 mean t2 at 0s
+        # vs 45-46 at any positive value, and 2/5 vs 0/5 high-bracket
+        # hits). Mechanism unclear (cable physics interaction), default 0.
+        # The soft-fail (return True on detection failure) and larger
+        # attempt budget (max_attempts=60) are the actual robustness net
+        # for spawn-retry / detection-flake scenarios.
+        settle_s = float(os.environ.get("AIC_V3_SETTLE_S", "0.0"))
+        if settle_s > 0.0:
+            self.sleep_for(settle_s)
 
         pose = self._detect_port_pose_v3(get_observation, task.port_type)
         if pose is None:
