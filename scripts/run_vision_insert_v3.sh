@@ -14,9 +14,13 @@
 #   AIC_V1_WEIGHTS    Path to the trained YOLO best.pt. Default ~/aic_runs/
 #                     v1_h100_results/best.pt. Download from
 #                     https://huggingface.co/HexDexAIC/aic-port-yolo-v1
-#   IMAGE             Eval Docker image tag. Default aic_eval:fixed18 (the
-#                     public AIC eval image). Override via `IMAGE=mytag ./run_...`
-#                     if you have a locally-patched build.
+#   IMAGE             Eval Docker image tag. Default
+#                     ghcr.io/intrinsic-dev/aic/aic_eval:latest (the
+#                     official upstream image — same one referenced in
+#                     the repo's docker/docker-compose.yaml). The script
+#                     pulls it automatically if not cached locally.
+#                     Override via `IMAGE=mytag ./run_...` if you've built
+#                     your own.
 #   SUDO_PW           Sudo password for `mount --make-rshared /` step.
 #                     Required only if you haven't already run that mount on
 #                     this host. Override via `SUDO_PW=xxx ./run_...`.
@@ -25,13 +29,28 @@
 set -e
 export PATH=$HOME/.pixi/bin:$PATH
 SUDO_PW=${SUDO_PW:-}
-IMAGE=${IMAGE:-aic_eval:fixed18}
+IMAGE=${IMAGE:-ghcr.io/intrinsic-dev/aic/aic_eval:latest}
 CONTAINER="aic_eval_vi_v3"
 RESULTS="$HOME/aic_results_visioninsert_v3"
 WEIGHTS=${AIC_V1_WEIGHTS:-$HOME/aic_runs/v1_h100_results/best.pt}
 WORKSPACE=${AIC_WORKSPACE:-$HOME/ws_aic/src/aic}
 
 log() { echo -e "\e[1;34m[VisionInsert_v3]\e[0m $*"; }
+
+# ─── ensure IMAGE is available (pull if needed) ───────────────────────────────
+# The default IMAGE points at the upstream registry; pull on first run so
+# teammates don't need to pre-pull manually. If IMAGE is overridden to a
+# locally-built tag, this just becomes a no-op (docker pull errors on
+# unknown registries are tolerated).
+log "Step 0: ensure eval image is available ($IMAGE)"
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    log "Image not cached locally — pulling..."
+    docker pull "$IMAGE" || {
+        log "ERROR: could not pull $IMAGE. If you've built your own eval image,"
+        log "       set IMAGE=<your-tag> and re-run."
+        exit 1
+    }
+fi
 
 log "Step 1: cleanup any prior container/results + stale host-side aic_model procs"
 docker rm -f $CONTAINER 2>/dev/null || true
