@@ -319,7 +319,7 @@ START="$(date +%s)"
 ENGINE_CMD="export AIC_RESULTS_DIR='$OUTPUT_DIR' && exec /entrypoint.sh ground_truth:=$GROUND_TRUTH start_aic_engine:=true shutdown_on_aic_engine_exit:=true gazebo_gui:=$GAZEBO_GUI launch_rviz:=$LAUNCH_RVIZ aic_engine_config_file:='$CONFIG'"
 (
     if [[ "${AIC_USE_DOCKER_EXEC:-0}" == "1" ]]; then
-        exec docker exec -i aic_eval bash -c "$ENGINE_CMD"
+        exec docker exec -i -e DISPLAY -e XAUTHORITY -e WAYLAND_DISPLAY -e QT_X11_NO_MITSHM=1 aic_eval bash -c "$ENGINE_CMD"
     else
         exec distrobox enter -r aic_eval -- bash -c "$ENGINE_CMD"
     fi
